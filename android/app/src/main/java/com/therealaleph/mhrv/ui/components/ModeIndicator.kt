@@ -17,7 +17,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.res.stringResource
 import com.therealaleph.mhrv.*
+import com.therealaleph.mhrv.R
 import com.therealaleph.mhrv.ui.theme.*
 
 private data class ModeOption(
@@ -169,9 +171,9 @@ fun ModeIndicator(
 
         // Descriptive subtitle for current mode
         val description = when (mode) {
-            Mode.APPS_SCRIPT -> "DPI bypass through Apps Script relay"
-            Mode.GOOGLE_ONLY -> "Direct access to *.google.com only"
-            Mode.FULL -> "All traffic tunneled end-to-end"
+            Mode.APPS_SCRIPT -> stringResource(R.string.mode_desc_apps_script)
+            Mode.GOOGLE_ONLY -> stringResource(R.string.mode_desc_google_only)
+            Mode.FULL -> stringResource(R.string.mode_desc_full)
         }
         Surface(
             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f),

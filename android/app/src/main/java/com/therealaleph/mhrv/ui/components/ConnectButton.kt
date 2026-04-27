@@ -14,7 +14,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import com.therealaleph.mhrv.R
 import com.therealaleph.mhrv.HealthState
 import com.therealaleph.mhrv.VpnHealthState
 import com.therealaleph.mhrv.VpnState
@@ -24,6 +26,15 @@ import com.therealaleph.mhrv.ui.theme.DisconnectedGray
 import com.therealaleph.mhrv.ui.theme.ErrRed
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
+
+private enum class ConnectButtonState {
+    DISCONNECTED,
+    STARTING,
+    VERIFYING,
+    CONNECTED,
+    FAILED,
+    STOPPING
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -48,13 +59,24 @@ fun ConnectButton(
         }
     }
 
-    val targetColor = when {
-        transitioning || (isRunning && (healthState == HealthState.VERIFYING || healthState == HealthState.UNKNOWN)) -> ConnectingAmber
-        isRunning && healthState == HealthState.UNHEALTHY -> ErrRed
-        isRunning && healthState == HealthState.HEALTHY -> ConnectedGreen
-        isRunning -> ConnectingAmber
-        !enabled -> DisconnectedGray.copy(alpha = 0.5f)
-        else -> DisconnectedGray
+    val state = when {
+        awaitingRunning == true -> ConnectButtonState.STARTING
+        awaitingRunning == false -> ConnectButtonState.STOPPING
+        isRunning -> when (healthState) {
+            HealthState.VERIFYING, HealthState.UNKNOWN -> ConnectButtonState.VERIFYING
+            HealthState.HEALTHY -> ConnectButtonState.CONNECTED
+            HealthState.UNHEALTHY, HealthState.NEEDS_CERTIFICATE -> ConnectButtonState.FAILED
+        }
+        else -> ConnectButtonState.DISCONNECTED
+    }
+
+    val targetColor = when (state) {
+        ConnectButtonState.STARTING, ConnectButtonState.VERIFYING -> ConnectingAmber
+        ConnectButtonState.CONNECTED -> ConnectedGreen
+        ConnectButtonState.FAILED -> ErrRed
+        ConnectButtonState.STOPPING, ConnectButtonState.DISCONNECTED -> {
+            if (!enabled) DisconnectedGray.copy(alpha = 0.5f) else DisconnectedGray
+        }
     }
 
     val animatedColor by animateColorAsState(
@@ -78,8 +100,7 @@ fun ConnectButton(
         modifier = Modifier.size(200.dp),
         contentAlignment = Alignment.Center
     ) {
-        val showProgress = transitioning || (isRunning && (healthState == HealthState.VERIFYING || healthState == HealthState.UNKNOWN))
-        if (showProgress) {
+        if (state == ConnectButtonState.STARTING || state == ConnectButtonState.VERIFYING) {
             Canvas(modifier = Modifier.fillMaxSize()) {
                 drawArc(
                     color = ConnectingAmber,
@@ -121,10 +142,10 @@ fun ConnectButton(
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    text = when {
-                        transitioning -> "Wait..."
-                        isRunning -> "Stop"
-                        else -> "Connect"
+                    text = when (state) {
+                        ConnectButtonState.STARTING, ConnectButtonState.STOPPING -> stringResource(R.string.status_wait)
+                        ConnectButtonState.DISCONNECTED -> stringResource(R.string.btn_connect)
+                        else -> stringResource(R.string.btn_disconnect)
                     },
                     style = MaterialTheme.typography.titleMedium,
                     color = Color.White

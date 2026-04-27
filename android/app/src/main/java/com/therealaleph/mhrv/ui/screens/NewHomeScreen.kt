@@ -37,17 +37,33 @@ fun NewHomeScreen(
     var cfg by remember { mutableStateOf(ConfigStore.load(ctx)) }
     val isRunning by VpnState.isRunning.collectAsState()
     val healthState by VpnHealthState.healthState.collectAsState()
+    val verificationProgress by VpnHealthState.verificationProgress.collectAsState()
 
     // Sync config when returning from settings or other changes
     LaunchedEffect(Unit) {
         cfg = ConfigStore.load(ctx)
     }
 
-    LaunchedEffect(isRunning) {
+    LaunchedEffect(isRunning, cfg.mode) {
         if (isRunning) {
             if (healthState == HealthState.UNKNOWN) {
+                // If in Relay mode, check if certificate is installed first
+                if (cfg.mode == Mode.APPS_SCRIPT) {
+                    val fingerprint = withContext(Dispatchers.IO) { CaInstall.fingerprint(ctx) }
+                    if (fingerprint == null || !CaInstall.isInstalled(fingerprint)) {
+                        VpnHealthState.setHealthState(HealthState.NEEDS_CERTIFICATE)
+                        return@LaunchedEffect
+                    }
+                }
+
                 VpnHealthState.setHealthState(HealthState.VERIFYING)
-                val isHealthy = ConnectionTester.verifyConnection(proxyPort = cfg.listenPort)
+                val isHealthy = ConnectionTester.verifyConnection(
+                    mode = cfg.mode, 
+                    proxyPort = cfg.listenPort,
+                    onProgress = { current, total ->
+                        VpnHealthState.setVerificationProgress(ctx.getString(R.string.status_attempt_prefix, current, total))
+                    }
+                )
                 VpnHealthState.setHealthState(if (isHealthy) HealthState.HEALTHY else HealthState.UNHEALTHY)
             }
         } else {
@@ -159,15 +175,20 @@ fun NewHomeScreen(
                 ) {
                     Text(
                         text = when {
+                            isRunning && healthState == HealthState.NEEDS_CERTIFICATE -> stringResource(R.string.status_needs_certificate)
                             isRunning && (healthState == HealthState.VERIFYING || healthState == HealthState.UNKNOWN) -> stringResource(R.string.status_verifying)
                             isRunning && healthState == HealthState.UNHEALTHY -> stringResource(R.string.status_connected_no_internet)
-                            isRunning && healthState == HealthState.HEALTHY -> stringResource(R.string.status_protected)
+                            isRunning && healthState == HealthState.HEALTHY -> {
+                                if (cfg.mode == Mode.GOOGLE_ONLY) stringResource(R.string.status_protected_google_only)
+                                else stringResource(R.string.status_protected)
+                            }
                             isRunning -> stringResource(R.string.status_verifying) // Fallback for transition
                             isConfigMissing -> stringResource(R.string.status_config_incomplete)
                             else -> stringResource(R.string.status_not_connected)
                         },
                         style = MaterialTheme.typography.titleMedium,
                         color = when {
+                            isRunning && healthState == HealthState.NEEDS_CERTIFICATE -> MaterialTheme.colorScheme.error
                             isRunning && (healthState == HealthState.VERIFYING || healthState == HealthState.UNKNOWN) -> com.therealaleph.mhrv.ui.theme.ConnectingAmber
                             isRunning && healthState == HealthState.UNHEALTHY -> com.therealaleph.mhrv.ui.theme.ErrRed
                             isRunning && healthState == HealthState.HEALTHY -> com.therealaleph.mhrv.ui.theme.OkGreen
@@ -181,8 +202,21 @@ fun NewHomeScreen(
                         IconButton(
                             onClick = {
                                 scope.launch {
+                                    if (cfg.mode == Mode.APPS_SCRIPT) {
+                                        val fingerprint = withContext(Dispatchers.IO) { CaInstall.fingerprint(ctx) }
+                                        if (fingerprint == null || !CaInstall.isInstalled(fingerprint)) {
+                                            VpnHealthState.setHealthState(HealthState.NEEDS_CERTIFICATE)
+                                            return@launch
+                                        }
+                                    }
                                     VpnHealthState.setHealthState(HealthState.VERIFYING)
-                                    val isHealthy = ConnectionTester.verifyConnection(proxyPort = cfg.listenPort)
+                                    val isHealthy = ConnectionTester.verifyConnection(
+                                        mode = cfg.mode, 
+                                        proxyPort = cfg.listenPort,
+                                        onProgress = { current, total ->
+                                            VpnHealthState.setVerificationProgress(ctx.getString(R.string.status_attempt_prefix, current, total))
+                                        }
+                                    )
                                     VpnHealthState.setHealthState(if (isHealthy) HealthState.HEALTHY else HealthState.UNHEALTHY)
                                 }
                             },
@@ -199,10 +233,22 @@ fun NewHomeScreen(
                         }
                     }
                 }
+                
+                if (isRunning && healthState == HealthState.VERIFYING) {
+                    verificationProgress?.let {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = it,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = com.therealaleph.mhrv.ui.theme.ConnectingAmber.copy(alpha = 0.8f)
+                        )
+                    }
+                }
 
-                if (isConfigMissing) {
+                if (isConfigMissing || (isRunning && healthState == HealthState.NEEDS_CERTIFICATE)) {
                     Text(
-                        text = stringResource(R.string.help_config_required_sub),
+                        text = if (healthState == HealthState.NEEDS_CERTIFICATE) stringResource(R.string.help_install_cert_sub)
+                               else stringResource(R.string.help_config_required_sub),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.error.copy(alpha = 0.7f)
                     )

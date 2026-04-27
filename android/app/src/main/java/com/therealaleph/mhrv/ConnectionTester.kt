@@ -20,13 +20,27 @@ import java.net.URL
  * the brief blackout window during VPN establishment.
  */
 object ConnectionTester {
-    suspend fun verifyConnection(proxyPort: Int? = null, timeoutMs: Int = 8000, retries: Int = 3): Boolean = withContext(Dispatchers.IO) {
+    suspend fun verifyConnection(
+        mode: Mode = Mode.FULL,
+        proxyPort: Int? = null,
+        timeoutMs: Int = 20000,
+        retries: Int = 5,
+        onProgress: ((Int, Int) -> Unit)? = null
+    ): Boolean = withContext(Dispatchers.IO) {
+        // For GOOGLE_ONLY mode, we don't perform a connection test
+        if (mode == Mode.GOOGLE_ONLY) {
+            return@withContext true
+        }
+
         val endpoints = listOf(
             "https://api.ipify.org",
             "http://gstatic.com/generate_204"
         )
         
         for (i in 0 until retries) {
+            if (i > 0) {
+                onProgress?.invoke(i + 1, retries)
+            }
             var anySuccess = false
             for (endpoint in endpoints) {
                 try {
@@ -41,8 +55,7 @@ object ConnectionTester {
                     conn.instanceFollowRedirects = false
                     
                     val code = conn.responseCode
-                    // 204 for gstatic, 200 for ipify
-                    if (code == 204 || code == 200) {
+                    if (code in 200..399) {
                         anySuccess = true
                         break
                     }

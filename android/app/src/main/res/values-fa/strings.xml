@@ -18,6 +18,7 @@
     <!-- Primary actions -->
     <string name="btn_connect">اتصال</string>
     <string name="btn_disconnect">قطع</string>
+    <string name="status_wait">منتظر بمانید…</string>
     <string name="btn_install_mitm">نصب گواهی MITM</string>
     <string name="btn_auto_detect_google_ip">تشخیص خودکار google_ip</string>
     <string name="btn_test_all">تست همه</string>
@@ -97,12 +98,15 @@
     <!-- "How to use" guide body. Localized — EN copy lives in values. -->
     <string name="help_how_to_use">۱. یک یا چند آدرس deployment از Apps Script (یا فقط ID خام) و همراه آن auth_key خود را جای‌گذاری کنید.\n۲. روی «نصب گواهی MITM» بزنید و پیام تأیید را قبول کنید — گواهی در Downloads/mhrv-ca.crt ذخیره می‌شود و برنامهٔ Settings باز می‌شود. داخل Settings از نوار جست‌وجو «CA certificate» را پیدا کنید و روی همان نتیجه بزنید (نه «VPN &amp; app user certificate» و نه «Wi-Fi»)، سپس mhrv-ca.crt را از Downloads انتخاب کنید. اگر قفل صفحه ندارید، اندروید می‌خواهد یکی تنظیم کنید (الزام سیستم).\n۳. قبل از Start، بخش «مجموعهٔ SNI + تستر» را باز کنید و «تست همه» را بزنید. اگر همه تایم‌اوت شدند یعنی google_ip در دسترس نیست — آن را با یک IP جایگزین کنید که روی شبکهٔ سالم resolve می‌شود (مثلاً `nslookup www.google.com` روی هر دستگاه سالم).\n۴. Start را بزنید و درخواست VPN را تأیید کنید. پل TUN کامل، تمام برنامه‌های دستگاه را خودکار از پروکسی رد می‌کند — نیاز به تنظیم per-app نیست.\n۵. اگر Chrome پیام «504 Relay timeout» نشان داد: deployment شما پاسخ نمی‌دهد. اسکریپت را دوباره deploy کنید، URL جدید /exec را بگیرید و بالا جای‌گذاری کنید. در «لاگ زنده» ببینید خطا از نوع «Relay timeout» است یا «connect:» — نوع خطا مشخص می‌کند کدام لایه مقصر است.\n\nمحدودیت شناخته‌شده — Cloudflare Turnstile («Verify you are human») روی اکثر سایت‌های پشت Cloudflare به‌طور بی‌پایان loop می‌زند. هر درخواست Apps Script از یک IP خروجی چرخشی دیتاسنتر گوگل + یک User-Agent ثابت «Google-Apps-Script» + اثرانگشت TLS گوگل عبور می‌کند. کوکی cf_clearance به tuple (IP, UA, JA3) مربوط به زمان حل چالش گره خورده است، پس درخواست بعدی — از یک IP خروجی متفاوت — دوباره چالش می‌خورد. این مسئله در این برنامه قابل‌حل نیست؛ ذات رلهٔ Apps Script است. سایت‌هایی که فقط بارگذاری اولیه را gate می‌کنند (نه هر درخواست) بعد از یک بار حل، کار خواهند کرد.</string>
     <string name="status_protected">متصل</string>
+    <string name="status_protected_google_only">متصل (فقط گوگل)</string>
     <string name="status_not_connected">متصل نیست</string>
     <string name="status_config_incomplete">تنظیمات ناقص</string>
     <string name="status_verifying">در حال بررسی…</string>
     <string name="status_connected_no_internet">عدم دسترسی به اینترنت</string>
+    <string name="status_needs_certificate">نیاز به نصب گواهی</string>
     <string name="btn_verify_connection">بررسی مجدد</string>
     <string name="help_config_required_sub">IDها و کلید را در تنظیمات وارد کنید</string>
+    <string name="help_install_cert_sub">برای استفاده از رله گواهی را نصب کنید</string>
 
     <!-- Google Reachability -->
     <string name="status_google_checking">در حال بررسی اتصال گوگل…</string>
@@ -112,6 +116,7 @@
     <string name="status_google_unreachable">گوگل در دسترس نیست</string>
     <string name="title_settings">تنظیمات</string>
     <string name="sni_status">وضعیت SNI</string>
+    <string name="status_attempt_prefix">تلاش %1$d از %2$d</string>
 
     <!-- Unlock Screen -->
     <string name="unlock_title">برنامه قفل است</string>
@@ -123,4 +128,8 @@
     <string name="unlock_btn_skip_manual">رد کردن و تنظیم دستی</string>
     <string name="unlock_btn_skip_update">فعلاً رد کن</string>
     <string name="unlock_err_invalid">رمز اشتباه است. دوباره تلاش کنید.</string>
+    <!-- Mode Descriptions -->
+    <string name="mode_desc_full">تونل کامل برای تمام برنامه‌ها و سایت‌ها.</string>
+    <string name="mode_desc_google_only">فقط برای دسترسی به سرویس‌های گوگل.</string>
+    <string name="mode_desc_apps_script">کارایی بالاتر، نیاز به نصب گواهی.</string>
 </resources>
