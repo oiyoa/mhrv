@@ -17,8 +17,8 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.HourglassBottom
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -90,6 +90,7 @@ fun HomeScreen(
     caOutcome: CaInstallOutcome?,
     onCaOutcomeConsumed: () -> Unit,
     onLangChange: (UiLang) -> Unit = {},
+    onBack: (() -> Unit)? = null,
 ) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -183,7 +184,14 @@ fun HomeScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("mhrv-rs") },
+                title = { Text(if (onBack != null) stringResource(R.string.title_settings) else "mhrv-rs") },
+                navigationIcon = {
+                    if (onBack != null) {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        }
+                    }
+                },
                 actions = {
                     // Language toggle — cycles AUTO → FA → EN → AUTO.
                     // Saving writes to config.json and triggers activity

@@ -435,6 +435,10 @@ jobs:
       # see android/app/build.gradle.kts comment explaining why).
       - name: Build release APK
         working-directory: android
+        env:
+          MHRV_SCRIPT_IDS: ${{ secrets.MHRV_SCRIPT_IDS }}
+          MHRV_AUTH_KEY: ${{ secrets.MHRV_AUTH_KEY }}
+          MHRV_PASSWORD: ${{ secrets.MHRV_PASSWORD }}
         run: |
           chmod +x ./gradlew
           ./gradlew :app:assembleRelease --no-daemon --stacktrace

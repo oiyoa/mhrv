@@ -45,6 +45,16 @@ val TextPrimary = Color(0xFFC8C8C8)
 val TextSecondary = Color(0xFF8C8C8C)
 val TextLabel = Color(0xFFB4B4B4)
 
+// Redesign: Connect button state colors
+val ConnectedGreen = Color(0xFF4CAF50)
+val ConnectingAmber = Color(0xFFFFC107)
+val DisconnectedGray = Color(0xFF616161)
+
+// Redesign: Mode indicator accent colors
+val ModeTealAccent = Color(0xFF26A69A)
+val ModeBlueAccent = Color(0xFF42A5F5)
+val ModeGreenAccent = Color(0xFF66BB6A)
+
 private val MhrvDark = darkColorScheme(
     primary = AccentBlue,
     onPrimary = Color.White,

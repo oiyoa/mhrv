@@ -1,9 +1,41 @@
+import org.gradle.api.GradleException
 import org.gradle.api.tasks.Exec
+import javax.crypto.Cipher
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.PBEKeySpec
+import javax.crypto.spec.SecretKeySpec
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.Base64
+import java.util.Properties
 
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+/**
+ * Encrypts raw secrets into the blob format expected by SecretsManager.kt.
+ * PBKDF2-HMAC-SHA256 (600k iterations) + AES-256-GCM.
+ */
+fun encryptSecrets(scriptIds: List<String>, authKey: String, password: String): String {
+    val json = """{"script_ids":[${scriptIds.joinToString(",") { "\"$it\"" }}],"auth_key":"$authKey"}"""
+    val salt = ByteArray(16).apply { SecureRandom().nextBytes(this) }
+    val iv = ByteArray(12).apply { SecureRandom().nextBytes(this) }
+
+    val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+    val spec = PBEKeySpec(password.toCharArray(), salt, 600000, 256)
+    val tmp = factory.generateSecret(spec)
+    val secret = SecretKeySpec(tmp.encoded, "AES")
+
+    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+    cipher.init(Cipher.ENCRYPT_MODE, secret, GCMParameterSpec(128, iv))
+    val ciphertext = cipher.doFinal(json.toByteArray(Charsets.UTF_8))
+
+    val blob = salt + iv + ciphertext
+    return Base64.getEncoder().encodeToString(blob)
 }
 
 android {
@@ -28,6 +60,34 @@ android {
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
         }
+
+        // Embedded secrets.
+        val localProperties = Properties()
+        val localPropertiesFile = project.rootProject.file("local.properties")
+        if (localPropertiesFile.exists()) {
+            localPropertiesFile.inputStream().use { localProperties.load(it) }
+        }
+        
+        // Pull from env (CI) or local.properties (Dev)
+        val rawIds = System.getenv("MHRV_SCRIPT_IDS") ?: localProperties.getProperty("mhrv.script_ids") ?: ""
+        val rawKey = System.getenv("MHRV_AUTH_KEY") ?: localProperties.getProperty("mhrv.auth_key") ?: ""
+        val rawPwd = System.getenv("MHRV_PASSWORD") ?: localProperties.getProperty("mhrv.password") ?: ""
+        
+        var secretsBlob = ""
+        var secretsHash = ""
+        if (rawIds.isNotEmpty() && rawKey.isNotEmpty() && rawPwd.isNotEmpty()) {
+            val ids = rawIds.split(Regex("[\\s,;]+")).filter { it.isNotBlank() }
+            secretsBlob = encryptSecrets(ids, rawKey, rawPwd)
+            
+            val digest = MessageDigest.getInstance("SHA-256")
+            val hashBytes = digest.digest(secretsBlob.toByteArray(Charsets.UTF_8))
+            secretsHash = hashBytes.joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
+            
+            println("BUILD: Encrypting embedded secrets for BuildConfig (hash: ${secretsHash.take(8)}...)")
+        }
+            
+        buildConfigField("String", "ENCRYPTED_SECRETS", "\"$secretsBlob\"")
+        buildConfigField("String", "SECRETS_HASH", "\"$secretsHash\"")
     }
 
     signingConfigs {
@@ -140,6 +200,9 @@ dependencies {
     implementation("com.google.zxing:core:3.5.3")
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 
+    // Secure Storage & Encryption (Phase 1)
+    implementation("com.google.crypto.tink:tink-android:1.15.0")
+
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 }
@@ -155,6 +218,23 @@ dependencies {
 // --------------------------------------------------------------------------
 val rustCrateDir = rootProject.projectDir.parentFile
 val jniLibsDir = file("src/main/jniLibs")
+
+/**
+ * Locate the `cargo` executable on the host system.
+ */
+fun resolveCargoExecutable(): String {
+    val candidates = buildList {
+        System.getenv("CARGO")?.takeIf { it.isNotBlank() }?.let(::add)
+        System.getenv("CARGO_HOME")?.takeIf { it.isNotBlank() }?.let { add("$it/bin/cargo") }
+        add("${System.getProperty("user.home")}/.cargo/bin/cargo")
+        add("/opt/homebrew/bin/cargo")
+        add("/usr/local/bin/cargo")
+    }
+    val found = candidates.firstOrNull { file(it).canExecute() }
+    return found ?: throw GradleException("Could not locate Cargo.")
+}
+
+val cargoExecutable = resolveCargoExecutable()
 
 // After cargo-ndk dumps artifacts into each jniLibs/<abi>/ dir, the
 // tun2proxy cdylib lands as `libtun2proxy-<hash>.so` (rustc's deps/ naming
@@ -194,7 +274,7 @@ tasks.register<Exec>("cargoBuildDebug") {
     description = "Cross-compile mhrv_rs for all ABIs (release — same as cargoBuildRelease)"
     workingDir = rustCrateDir
     commandLine(buildList<String> {
-        add("cargo"); add("ndk")
+        add(cargoExecutable); add("ndk")
         androidAbis.forEach { add("-t"); add(it) }
         add("-o"); add(jniLibsDir.absolutePath)
         add("build"); add("--release")
@@ -207,7 +287,7 @@ tasks.register<Exec>("cargoBuildRelease") {
     description = "Cross-compile mhrv_rs for all ABIs (release)"
     workingDir = rustCrateDir
     commandLine(buildList<String> {
-        add("cargo"); add("ndk")
+        add(cargoExecutable); add("ndk")
         androidAbis.forEach { add("-t"); add(it) }
         add("-o"); add(jniLibsDir.absolutePath)
         add("build"); add("--release")

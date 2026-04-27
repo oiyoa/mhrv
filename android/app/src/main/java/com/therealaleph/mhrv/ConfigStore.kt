@@ -74,7 +74,7 @@ enum class UiLang { AUTO, FA, EN }
 enum class Mode { APPS_SCRIPT, GOOGLE_ONLY, FULL }
 
 data class MhrvConfig(
-    val mode: Mode = Mode.APPS_SCRIPT,
+    val mode: Mode = Mode.FULL,
 
     val listenHost: String = "127.0.0.1",
     val listenPort: Int = 8080,
@@ -228,12 +228,16 @@ object ConfigStore {
 
     fun load(ctx: Context): MhrvConfig {
         val f = File(ctx.filesDir, FILE)
-        if (!f.exists()) return MhrvConfig()
-        return try {
-            loadFromJson(JSONObject(f.readText()))
-        } catch (_: Throwable) {
+        val diskCfg = if (!f.exists()) {
             MhrvConfig()
+        } else {
+            try {
+                loadFromJson(JSONObject(f.readText()))
+            } catch (_: Throwable) {
+                MhrvConfig()
+            }
         }
+        return SecretsManager.applySecrets(ctx, diskCfg)
     }
 
     fun save(ctx: Context, cfg: MhrvConfig) {

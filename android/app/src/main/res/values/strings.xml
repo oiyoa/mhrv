@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">mhrv-rs</string>
+    <string name="title_settings">Settings</string>
+
 
     <!-- Top-bar -->
     <string name="tb_check_update_checking">checking…</string>
@@ -96,6 +98,7 @@
     <string name="snack_google_ip_current">google_ip already current (%1$s)</string>
     <string name="snack_dns_lookup_failed">DNS lookup failed — check network</string>
     <string name="snack_logs_copied">Logs copied to clipboard</string>
+    <string name="err_config_required">Missing configuration. Please set Deployment IDs and Auth Key in Settings.</string>
 
     <!-- Usage today card -->
     <string name="sec_usage_today">Usage today (estimated)</string>
@@ -110,4 +113,30 @@
 
     <!-- "How to use" guide body. Localized — FA copy lives in values-fa. -->
     <string name="help_how_to_use">1. Paste one or more Apps Script deployment URLs (or bare IDs) and your auth_key.\n2. Tap Install MITM certificate. Confirm the dialog — the cert is saved to Downloads/mhrv-ca.crt and the Settings app opens. Use Settings\' search bar to find \"CA certificate\", tap that result (NOT \"VPN &amp; app user certificate\" or \"Wi-Fi\"), and pick mhrv-ca.crt from Downloads. You\'ll be asked to set a screen lock if you don\'t have one (Android requirement).\n3. Before tapping Start, expand \"SNI pool + tester\" and hit \"Test all\". If every entry times out, your google_ip is unreachable — replace it with one that resolves locally (e.g. `nslookup www.google.com` on any working device).\n4. Tap Start. Accept the VPN prompt. The full TUN bridge routes every app on the device through the proxy — no per-app setup needed.\n5. If Chrome shows \"504 Relay timeout\": your Apps Script deployment isn\'t responding. Redeploy the script, grab the new /exec URL, and paste it above. Watch Live logs for \"Relay timeout\" vs \"connect:\" errors to tell which layer is failing.\n\nKnown limitation — Cloudflare Turnstile (\"Verify you are human\") will loop endlessly on most CF-protected sites. Every Apps Script request uses a rotating Google-datacenter egress IP + a fixed \"Google-Apps-Script\" User-Agent + a Google TLS fingerprint. The cf_clearance cookie is bound to the (IP, UA, JA3) tuple the challenge was solved against, so the NEXT request — from a different egress IP — gets re-challenged. Nothing in this app can fix that; it\'s inherent to Apps Script as a relay. Sites that only gate the initial page load (not every request) will work after one solve.</string>
+    <string name="status_protected">Connected</string>
+    <string name="status_not_connected">Not Connected</string>
+    <string name="status_config_incomplete">Configuration Incomplete</string>
+    <string name="status_verifying">Verifying…</string>
+    <string name="status_connected_no_internet">No Internet Access</string>
+    <string name="btn_verify_connection">Verify Connection</string>
+    <string name="help_config_required_sub">Set Deployment IDs &amp; Auth Key in Settings</string>
+
+    <!-- Google Reachability -->
+    <string name="status_google_checking">Checking Google connectivity…</string>
+    <string name="status_google_idle">Waiting to check…</string>
+    <string name="status_google_reachable">Google is reachable</string>
+    <string name="status_google_partially_reachable">Google is partially reachable</string>
+    <string name="status_google_unreachable">Google is unreachable</string>
+    <string name="sni_status">SNI Status</string>
+
+    <!-- Unlock Screen -->
+    <string name="unlock_title">App Locked</string>
+    <string name="unlock_update_title">Update Available</string>
+    <string name="unlock_desc">Enter the shared password to unlock embedded VPN credentials.</string>
+    <string name="unlock_update_desc">A new set of embedded credentials is available. Enter the password to update.</string>
+    <string name="unlock_field_password">Unlock Password</string>
+    <string name="unlock_btn_unlock">Unlock</string>
+    <string name="unlock_btn_skip_manual">Skip and enter manually</string>
+    <string name="unlock_btn_skip_update">Skip update for now</string>
+    <string name="unlock_err_invalid">Invalid password. Please try again.</string>
 </resources>

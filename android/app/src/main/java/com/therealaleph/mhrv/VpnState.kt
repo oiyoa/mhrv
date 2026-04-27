@@ -37,11 +37,16 @@ object VpnState {
     private val _proxyHandle = MutableStateFlow(0L)
     val proxyHandle: StateFlow<Long> = _proxyHandle.asStateFlow()
 
+    private val _connectedSince = MutableStateFlow<Long?>(null)
+    val connectedSince: StateFlow<Long?> = _connectedSince.asStateFlow()
+
     fun setRunning(running: Boolean) {
         _isRunning.value = running
+        _connectedSince.value = if (running) System.currentTimeMillis() else null
     }
 
     fun setProxyHandle(handle: Long) {
         _proxyHandle.value = handle
     }
 }
+
