@@ -857,11 +857,15 @@ async fn fire_batch(
                     })
                     .sum();
                 f.record_today(response_bytes);
+                let sid_short = &script_id[..script_id.len().min(8)];
                 for (idx, reply) in data_replies {
                     if let Some(resp) = batch_resp.r.get(idx) {
                         let _ = reply.send(Ok((resp.clone(), script_id.clone())));
                     } else {
-                        let _ = reply.send(Err("missing response in batch".into()));
+                        let _ = reply.send(Err(format!(
+                            "missing response in batch from script {}",
+                            sid_short
+                        )));
                     }
                 }
             }
@@ -876,7 +880,42 @@ async fn fire_batch(
                     f.record_timeout_strike(&script_id);
                 }
                 let err_msg = format!("{}", e);
-                tracing::warn!("batch failed: {}", err_msg);
+                let sid_short = &script_id[..script_id.len().min(8)];
+                // Detect the body string we ship as the v1.8.0 bad-auth
+                // decoy. v1.8.1 asserted "AUTH_KEY mismatch" outright, but
+                // #404 (w0l4i) found the same body comes back from Apps
+                // Script in 3 other unrelated cases too:
+                //
+                //   1. AUTH_KEY mismatch                 — our intentional decoy
+                //   2. Apps Script execution timeout/    — runtime hit 6-min
+                //      mid-call quota tear                 cap or per-100s quota
+                //   3. Apps Script internal hiccup       — Google-side flake,
+                //                                          serves placeholder
+                //   4. ISP-side response truncation      — #313 pattern, the
+                //                                          response was assembled
+                //                                          but ate an RST mid-flight
+                //
+                // So we surface all four candidates instead of asserting #1.
+                // Users can flip DIAGNOSTIC_MODE=true in Code.gs to disambiguate:
+                // only #1 still returns the decoy in diagnostic mode; the
+                // others return real JSON or different errors.
+                if err_msg.contains("The script completed but did not return anything") {
+                    tracing::error!(
+                        "batch failed (script {}): got the v1.8.0 decoy/placeholder body — \
+                         could be (1) AUTH_KEY mismatch between mhrv-rs config and Code.gs \
+                         (run a direct curl probe against the deployment to verify), \
+                         (2) Apps Script execution timeout or per-100s quota tear (try \
+                         lowering parallel_concurrency in config), (3) Apps Script \
+                         internal hiccup (transient, retry next batch), or (4) ISP-side \
+                         response truncation (#313 pattern, try a different google_ip). \
+                         To distinguish (1) from the rest: set DIAGNOSTIC_MODE=true at \
+                         the top of Code.gs + redeploy as new version — only AUTH_KEY \
+                         mismatch returns this body in diagnostic mode.",
+                        sid_short
+                    );
+                } else {
+                    tracing::warn!("batch failed (script {}): {}", sid_short, err_msg);
+                }
                 for (_, reply) in data_replies {
                     let _ = reply.send(Err(err_msg.clone()));
                 }
@@ -886,7 +925,13 @@ async fn fire_batch(
                 // stronger signal than a per-read timeout — count it the same
                 // way so a truly-stuck deployment exits round-robin fast.
                 f.record_timeout_strike(&script_id);
-                tracing::warn!("batch timed out after {:?} ({} ops)", BATCH_TIMEOUT, n_ops);
+                let sid_short = &script_id[..script_id.len().min(8)];
+                tracing::warn!(
+                    "batch timed out after {:?} (script {}, {} ops)",
+                    BATCH_TIMEOUT,
+                    sid_short,
+                    n_ops
+                );
                 for (_, reply) in data_replies {
                     let _ = reply.send(Err("batch timed out".into()));
                 }
