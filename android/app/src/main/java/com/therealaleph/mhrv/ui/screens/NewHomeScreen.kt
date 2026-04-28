@@ -12,6 +12,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.therealaleph.mhrv.*
 import com.therealaleph.mhrv.ui.components.*
@@ -20,6 +21,8 @@ import com.therealaleph.mhrv.ui.CaInstallOutcome
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.therealaleph.mhrv.ui.screens.UnlockSheet
+
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -39,9 +42,16 @@ fun NewHomeScreen(
     val healthState by VpnHealthState.healthState.collectAsState()
     val verificationProgress by VpnHealthState.verificationProgress.collectAsState()
 
+    val sheetState = rememberModalBottomSheetState()
+    var showUnlockSheet by remember { mutableStateOf(false) }
+
     // Sync config when returning from settings or other changes
     LaunchedEffect(Unit) {
         cfg = ConfigStore.load(ctx)
+        if (SecretsManager.hasEmbeddedSecrets() && 
+            (!SecretsManager.hasUnlockedSecrets(ctx) || SecretsManager.isUpdateAvailable(ctx))) {
+            showUnlockSheet = true
+        }
     }
 
     LaunchedEffect(isRunning, cfg.mode) {
@@ -115,6 +125,39 @@ fun NewHomeScreen(
             verticalArrangement = Arrangement.spacedBy(24.dp)
         ) {
             val isConfigMissing = cfg.mode != Mode.GOOGLE_ONLY && (!cfg.hasDeploymentId || cfg.authKey.isBlank())
+
+            if (SecretsManager.isUpdatePending(ctx)) {
+                Surface(
+                    onClick = { showUnlockSheet = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.15f),
+                    shape = MaterialTheme.shapes.small
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            stringResource(R.string.banner_update_desc),
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.weight(1f),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        TextButton(
+                            onClick = { showUnlockSheet = true },
+                            modifier = Modifier.height(32.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                        ) {
+                            Text(
+                                stringResource(R.string.banner_btn_apply),
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
 
             ModeIndicator(
                 mode = cfg.mode,
@@ -269,6 +312,29 @@ fun NewHomeScreen(
                     ConfigStore.save(ctx, it)
                 }
             )
+        }
+
+        if (showUnlockSheet) {
+            ModalBottomSheet(
+                onDismissRequest = { showUnlockSheet = false },
+                sheetState = sheetState,
+                dragHandle = { BottomSheetDefaults.DragHandle() },
+            ) {
+                UnlockSheet(
+                    isUpdate = SecretsManager.hasUnlockedSecrets(ctx),
+                    onUnlocked = {
+                        // Force apply the newly unlocked secrets to the persistent config.
+                        val updated = SecretsManager.forceApplySecrets(ctx, ConfigStore.load(ctx))
+                        ConfigStore.save(ctx, updated)
+                        cfg = updated // Sync local state
+                        showUnlockSheet = false
+                    },
+                    onSkip = {
+                        SecretsManager.skipUpdate(ctx)
+                        showUnlockSheet = false
+                    }
+                )
+            }
         }
     }
 }

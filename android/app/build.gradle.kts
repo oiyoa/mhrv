@@ -8,6 +8,7 @@ import javax.crypto.spec.SecretKeySpec
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
+import com.therealaleph.mhrv.SecretHasher
 import java.util.Properties
 
 plugins {
@@ -38,6 +39,29 @@ fun encryptSecrets(scriptIds: List<String>, authKey: String, password: String): 
     return Base64.getEncoder().encodeToString(blob)
 }
 
+// Embedded secrets.
+val localProperties = Properties()
+val localPropertiesFile = project.rootProject.file("local.properties")
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.inputStream().use { localProperties.load(it) }
+}
+
+// Pull from env (CI) or local.properties (Dev)
+val rawIds = System.getenv("MHRV_SCRIPT_IDS") ?: localProperties.getProperty("mhrv.script_ids") ?: ""
+val rawKey = System.getenv("MHRV_AUTH_KEY") ?: localProperties.getProperty("mhrv.auth_key") ?: ""
+val rawPwd = System.getenv("MHRV_PASSWORD") ?: localProperties.getProperty("mhrv.password") ?: ""
+
+var secretsBlob = ""
+var secretsHash = ""
+
+if (rawIds.isNotEmpty() && rawKey.isNotEmpty() && rawPwd.isNotEmpty()) {
+    val ids = rawIds.split(Regex("[\\s,;]+")).filter { it.isNotBlank() }
+    secretsBlob = encryptSecrets(ids, rawKey, rawPwd)
+    secretsHash = SecretHasher.calculateHash(ids, rawKey)
+
+    println("BUILD: Encrypting embedded secrets for BuildConfig (hash: ${secretsHash.take(8)}...)")
+}
+
 android {
     namespace = "com.therealaleph.mhrv"
     compileSdk = 34
@@ -60,34 +84,34 @@ android {
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
         }
-
-        // Embedded secrets.
-        val localProperties = Properties()
-        val localPropertiesFile = project.rootProject.file("local.properties")
-        if (localPropertiesFile.exists()) {
-            localPropertiesFile.inputStream().use { localProperties.load(it) }
-        }
-        
-        // Pull from env (CI) or local.properties (Dev)
-        val rawIds = System.getenv("MHRV_SCRIPT_IDS") ?: localProperties.getProperty("mhrv.script_ids") ?: ""
-        val rawKey = System.getenv("MHRV_AUTH_KEY") ?: localProperties.getProperty("mhrv.auth_key") ?: ""
-        val rawPwd = System.getenv("MHRV_PASSWORD") ?: localProperties.getProperty("mhrv.password") ?: ""
-        
-        var secretsBlob = ""
-        var secretsHash = ""
-        if (rawIds.isNotEmpty() && rawKey.isNotEmpty() && rawPwd.isNotEmpty()) {
-            val ids = rawIds.split(Regex("[\\s,;]+")).filter { it.isNotBlank() }
-            secretsBlob = encryptSecrets(ids, rawKey, rawPwd)
-            
-            val digest = MessageDigest.getInstance("SHA-256")
-            val hashBytes = digest.digest(secretsBlob.toByteArray(Charsets.UTF_8))
-            secretsHash = hashBytes.joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
-            
-            println("BUILD: Encrypting embedded secrets for BuildConfig (hash: ${secretsHash.take(8)}...)")
-        }
-            
         buildConfigField("String", "ENCRYPTED_SECRETS", "\"$secretsBlob\"")
         buildConfigField("String", "SECRETS_HASH", "\"$secretsHash\"")
+    }
+
+    // Generate the hashing utility into the build folder so the app can use the 
+    // exact same logic as the build script without needing buildSrc.
+    val genPath = layout.buildDirectory.dir("generated/source/mhrv/main")
+    val generateSecretHasher = tasks.register("generateSecretHasher") {
+        val inputFile = project.rootProject.file("buildSrc/src/main/kotlin/com/therealaleph/mhrv/SecretHasher.kt")
+        val outputFile = genPath.get().file("com/therealaleph/mhrv/SecretHasher.kt").asFile
+        inputs.file(inputFile)
+        outputs.file(outputFile)
+        doLast {
+            outputFile.parentFile.mkdirs()
+            outputFile.writeText(inputFile.readText())
+        }
+    }
+
+    sourceSets {
+        getByName("main") {
+            java.srcDirs(genPath)
+            jniLibs.srcDirs("src/main/jniLibs")
+        }
+    }
+
+    // Ensure the file is generated before compilation
+    tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
+        dependsOn(generateSecretHasher)
     }
 
     signingConfigs {

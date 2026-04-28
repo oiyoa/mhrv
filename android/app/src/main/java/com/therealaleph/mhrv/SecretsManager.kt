@@ -109,7 +109,7 @@ object SecretsManager {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit()
             .putString(KEY_SECRETS, Base64.encodeToString(encrypted, Base64.DEFAULT))
-            .putString(KEY_HASH, BuildConfig.SECRETS_HASH)
+            .putString(KEY_HASH, SecretHasher.calculateHash(secrets.scriptIds, secrets.authKey))
             .remove(KEY_SKIPPED_HASH) // Clear skip state if we successfully updated
             .apply()
     }
@@ -133,6 +133,19 @@ object SecretsManager {
         if (skippedHash == BuildConfig.SECRETS_HASH) return false
         
         return true
+    }
+
+    /**
+     * Returns true if there is a newer version of embedded secrets available,
+     * regardless of whether the user previously skipped the automatic popup.
+     */
+    fun isUpdatePending(context: Context): Boolean {
+        if (!hasEmbeddedSecrets()) return false
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val storedHash = prefs.getString(KEY_HASH, null)
+        
+        // Return true if we haven't stored anything yet OR if the stored hash is old.
+        return storedHash != BuildConfig.SECRETS_HASH
     }
 
     fun clearUnlockedSecrets(context: Context) {

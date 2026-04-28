@@ -136,16 +136,20 @@
 
     <!-- Unlock Screen -->
     <string name="unlock_title">App Locked</string>
-    <string name="unlock_update_title">Update Available</string>
+    <string name="unlock_update_title">New VPN Config</string>
     <string name="unlock_desc">Enter the shared password to unlock embedded VPN credentials.</string>
-    <string name="unlock_update_desc">A new set of embedded credentials is available. Enter the password to update.</string>
+    <string name="unlock_update_desc">A new VPN configuration is available. Enter the password to unlock and apply it.</string>
     <string name="unlock_field_password">Unlock Password</string>
     <string name="unlock_btn_unlock">Unlock</string>
     <string name="unlock_btn_skip_manual">Skip and enter manually</string>
-    <string name="unlock_btn_skip_update">Skip update for now</string>
+    <string name="unlock_btn_skip_update">Skip for now</string>
     <string name="unlock_err_invalid">Invalid password. Please try again.</string>
     <!-- Mode Descriptions -->
     <string name="mode_desc_full">Full tunnel for all apps and websites.</string>
     <string name="mode_desc_google_only">Use this to reach Google services only.</string>
     <string name="mode_desc_apps_script">Higher performance, needs a certificate.</string>
+
+    <!-- Update Banner -->
+    <string name="banner_update_desc">A newer VPN configuration is available.</string>
+    <string name="banner_btn_apply">Apply Now</string>
 </resources>

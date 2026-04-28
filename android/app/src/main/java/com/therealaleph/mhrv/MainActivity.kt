@@ -21,7 +21,6 @@ import com.therealaleph.mhrv.*
 import com.therealaleph.mhrv.ui.CaInstallOutcome
 import com.therealaleph.mhrv.ui.HomeScreen
 import com.therealaleph.mhrv.ui.screens.NewHomeScreen
-import com.therealaleph.mhrv.ui.screens.UnlockScreen
 import com.therealaleph.mhrv.ui.theme.MhrvTheme
 import androidx.compose.material3.SnackbarHostState
 import kotlinx.coroutines.flow.first
@@ -34,7 +33,7 @@ import kotlinx.coroutines.flow.first
 // Configuration + LayoutDirection on recreate(). Compose works fine on
 // top — setContent / rememberLauncherForActivityResult live on
 // ComponentActivity and AppCompatActivity inherits from it.
-enum class Screen { UNLOCK, HOME, SETTINGS }
+enum class Screen { HOME, SETTINGS }
 
 class MainActivity : AppCompatActivity() {
 
@@ -149,16 +148,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val snackbarHostState = remember { SnackbarHostState() }
-        var currentScreen by remember { 
-            mutableStateOf(
-                if (SecretsManager.hasEmbeddedSecrets() && 
-                    (!SecretsManager.hasUnlockedSecrets(this) || SecretsManager.isUpdateAvailable(this))) {
-                    Screen.UNLOCK
-                } else {
-                    Screen.HOME
-                }
-            )
-        }
+        var currentScreen by remember { mutableStateOf(Screen.HOME) }
 
         // MainActivity's onStart is intentionally dumb: it only
         // launches the VpnService. The auto-resolve that used to
@@ -240,20 +230,6 @@ class MainActivity : AppCompatActivity() {
         }
 
         when (currentScreen) {
-            Screen.UNLOCK -> UnlockScreen(
-                isUpdate = SecretsManager.hasUnlockedSecrets(this),
-                onUnlocked = { 
-                    // Force apply the newly unlocked secrets to the persistent config.
-                    val updated = SecretsManager.forceApplySecrets(this, ConfigStore.load(this))
-                    ConfigStore.save(this, updated)
-                    currentScreen = Screen.HOME 
-                },
-                onSkip = {
-                    SecretsManager.skipUpdate(this)
-                    currentScreen = Screen.HOME
-                },
-                onEnterManually = { currentScreen = Screen.SETTINGS }
-            )
             Screen.HOME -> NewHomeScreen(
                 onStart = onStart,
                 onStop = onStop,

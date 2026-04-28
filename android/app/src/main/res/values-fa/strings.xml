@@ -120,16 +120,20 @@
 
     <!-- Unlock Screen -->
     <string name="unlock_title">برنامه قفل است</string>
-    <string name="unlock_update_title">به‌روزرسانی موجود است</string>
+    <string name="unlock_update_title">تنظیمات جدید VPN</string>
     <string name="unlock_desc">رمز عبور مشترک را برای باز کردن تنظیمات داخلی وارد کنید.</string>
-    <string name="unlock_update_desc">یک مجموعه جدید از تنظیمات داخلی موجود است. برای به‌روزرسانی رمز را وارد کنید.</string>
+    <string name="unlock_update_desc">تنظیمات جدیدی برای VPN در دسترس است. برای باز کردن و اعمال آن، رمز عبور را وارد کنید.</string>
     <string name="unlock_field_password">رمز عبور</string>
     <string name="unlock_btn_unlock">باز کردن</string>
     <string name="unlock_btn_skip_manual">رد کردن و تنظیم دستی</string>
-    <string name="unlock_btn_skip_update">فعلاً رد کن</string>
+    <string name="unlock_btn_skip_update">فعلاً نه</string>
     <string name="unlock_err_invalid">رمز اشتباه است. دوباره تلاش کنید.</string>
     <!-- Mode Descriptions -->
     <string name="mode_desc_full">تونل کامل برای تمام برنامه‌ها و سایت‌ها.</string>
     <string name="mode_desc_google_only">فقط برای دسترسی به سرویس‌های گوگل.</string>
     <string name="mode_desc_apps_script">کارایی بالاتر، نیاز به نصب گواهی.</string>
+
+    <!-- Update Banner -->
+    <string name="banner_update_desc">تنظیمات جدیدی برای VPN در دسترس است.</string>
+    <string name="banner_btn_apply">اعمال</string>
 </resources>

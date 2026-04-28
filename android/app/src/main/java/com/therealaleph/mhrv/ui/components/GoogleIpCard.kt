@@ -30,16 +30,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
-/**
- * Result state of a connectivity check.
- */
-private sealed interface CheckResult {
-    data object Idle : CheckResult
-    data object Checking : CheckResult
-    data class Connected(val latencyMs: Int) : CheckResult
-    data object NotConnected : CheckResult
-}
-
 @Composable
 fun GoogleIpCard(
     cfg: MhrvConfig,
@@ -47,107 +37,22 @@ fun GoogleIpCard(
 ) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
-    var result by remember { mutableStateOf<CheckResult>(CheckResult.Idle) }
-    var checking by remember { mutableStateOf(false) }
     
-    // Track results for individual SNIs
-    val sniResults = remember { mutableStateMapOf<String, CheckResult>() }
-    // Take a small list of SNIs to test
-    val snisToTest = remember { DEFAULT_SNI_POOL.take(5) }
+    val result by GoogleReachabilityState.overallResult.collectAsState()
+    val checking by GoogleReachabilityState.isChecking.collectAsState()
+    val sniResults = GoogleReachabilityState.sniResults.collectAsState().value
+    
+    val snisToTest = GoogleReachabilityState.snisToTest
     var expanded by remember { mutableStateOf(false) }
 
-    fun checkAll() {
-        if (checking) return
-        checking = true
-        result = CheckResult.Checking
-        snisToTest.forEach { sni -> sniResults[sni] = CheckResult.Checking }
-
-        scope.launch {
-            var currentCfg = cfg
-            var connected = false
-            var latency = -1
-
-            // 1. Initial Test
-            if (currentCfg.googleIp.isNotBlank()) {
-                val json = withContext(Dispatchers.IO) {
-                    runCatching { Native.testSni(currentCfg.googleIp, currentCfg.frontDomain) }.getOrNull()
-                }
-                if (json != null) {
-                    val obj = try { JSONObject(json) } catch (_: Exception) { null }
-                    if (obj?.optBoolean("ok") == true) {
-                        connected = true
-                        latency = obj.optInt("latencyMs", -1)
-                    }
-                }
-            }
-
-            // 2. Auto-detect if failed or no IP
-            if (!connected) {
-                val fresh = withContext(Dispatchers.IO) {
-                    NetworkDetect.resolveGoogleIp()
-                }
-                if (!fresh.isNullOrBlank() && fresh != currentCfg.googleIp) {
-                    currentCfg = currentCfg.copy(googleIp = fresh)
-                    onUpdate(currentCfg)
-                    withContext(Dispatchers.Main) {
-                        Toast.makeText(ctx, "IP updated to $fresh", Toast.LENGTH_SHORT).show()
-                    }
-
-                    // 3. Retest with new IP
-                    val json2 = withContext(Dispatchers.IO) {
-                        runCatching { Native.testSni(currentCfg.googleIp, currentCfg.frontDomain) }.getOrNull()
-                    }
-                    if (json2 != null) {
-                        val obj = try { JSONObject(json2) } catch (_: Exception) { null }
-                        if (obj?.optBoolean("ok") == true) {
-                            connected = true
-                            latency = obj.optInt("latencyMs", -1)
-                        }
-                    }
-                } else if (!fresh.isNullOrBlank()) {
-                    withContext(Dispatchers.Main) {
-                        Toast.makeText(ctx, "IP unchanged, still unreachable", Toast.LENGTH_SHORT).show()
-                    }
-                } else {
-                    withContext(Dispatchers.Main) {
-                        Toast.makeText(ctx, "DNS lookup failed", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
-
-            result = if (connected) CheckResult.Connected(latency) else CheckResult.NotConnected
-
-            // 4. Test SNI pool in parallel
-            snisToTest.forEach { sni ->
-                scope.launch {
-                    val resJson = withContext(Dispatchers.IO) {
-                        runCatching { Native.testSni(currentCfg.googleIp, sni) }.getOrNull()
-                    }
-                    var sniConnected = false
-                    var sniLatency = -1
-                    if (resJson != null) {
-                        val obj = try { JSONObject(resJson) } catch (_: Exception) { null }
-                        if (obj?.optBoolean("ok") == true) {
-                            sniConnected = true
-                            sniLatency = obj.optInt("latencyMs", -1)
-                        }
-                    }
-                    sniResults[sni] = if (sniConnected) CheckResult.Connected(sniLatency) else CheckResult.NotConnected
-                }
-            }
-            
-            checking = false
-        }
-    }
-
-    // Auto-run on open
+    // Auto-run on open (respects hasAutoRun internally)
     LaunchedEffect(Unit) {
-        checkAll()
+        GoogleReachabilityState.checkAll(ctx, cfg, scope, force = false, onUpdate = onUpdate)
     }
 
-    val hasResult = result is CheckResult.Connected || result is CheckResult.NotConnected
-    val isTestingSnis = snisToTest.any { sniResults[it] is CheckResult.Checking }
-    val connectedCount = snisToTest.count { sniResults[it] is CheckResult.Connected }
+    val hasResult = result is GoogleCheckResult.Connected || result is GoogleCheckResult.NotConnected
+    val isTestingSnis = snisToTest.any { sniResults[it] is GoogleCheckResult.Checking }
+    val connectedCount = snisToTest.count { sniResults[it] is GoogleCheckResult.Connected }
 
     val statusColor by animateColorAsState(
         targetValue = when {
@@ -222,7 +127,7 @@ fun GoogleIpCard(
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(
-                        onClick = { checkAll() },
+                        onClick = { GoogleReachabilityState.checkAll(ctx, cfg, scope, force = true, onUpdate = onUpdate) },
                         enabled = !isLoading,
                         modifier = Modifier.size(32.dp)
                     ) {
@@ -256,7 +161,7 @@ fun GoogleIpCard(
             AnimatedVisibility(visible = expanded) {
                 Column(modifier = Modifier.padding(top = 16.dp)) {
                     snisToTest.forEach { sni ->
-                        val res = sniResults[sni] ?: CheckResult.Idle
+                        val res = sniResults[sni] ?: GoogleCheckResult.Idle
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
@@ -264,17 +169,17 @@ fun GoogleIpCard(
                                 .padding(vertical = 4.dp)
                         ) {
                             val icon = when (res) {
-                                is CheckResult.Connected -> Icons.Default.CheckCircle
-                                is CheckResult.NotConnected -> Icons.Default.Cancel
+                                is GoogleCheckResult.Connected -> Icons.Default.CheckCircle
+                                is GoogleCheckResult.NotConnected -> Icons.Default.Cancel
                                 else -> null
                             }
                             val color = when (res) {
-                                is CheckResult.Connected -> OkGreen
-                                is CheckResult.NotConnected -> ErrRed
+                                is GoogleCheckResult.Connected -> OkGreen
+                                is GoogleCheckResult.NotConnected -> ErrRed
                                 else -> MaterialTheme.colorScheme.onSurfaceVariant
                             }
-
-                            if (res is CheckResult.Checking) {
+                            
+                            if (res is GoogleCheckResult.Checking) {
                                 CircularProgressIndicator(
                                     modifier = Modifier.size(12.dp),
                                     strokeWidth = 1.5.dp,
@@ -298,7 +203,7 @@ fun GoogleIpCard(
                                 color = MaterialTheme.colorScheme.onSurface
                             )
 
-                            if (res is CheckResult.Connected && res.latencyMs > 0) {
+                            if (res is GoogleCheckResult.Connected && res.latencyMs > 0) {
                                 Spacer(Modifier.weight(1f))
                                 Text(
                                     text = "${res.latencyMs}ms",
