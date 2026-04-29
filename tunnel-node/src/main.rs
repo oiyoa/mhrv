@@ -83,6 +83,22 @@ const UDP_QUEUE_LIMIT: usize = 256;
 /// a maximum-size IPv4 datagram without truncation.
 const UDP_RECV_BUF_BYTES: usize = 65536;
 
+/// Maximum raw bytes per TCP drain that we hand back to Apps Script in
+/// one batch response. Apps Script's hard cap on Web App response body
+/// is ~50 MiB. Accounting for base64 encoding (1.33×) and JSON envelope
+/// overhead, the safe ceiling for raw bytes is roughly 32 MiB — but
+/// `serde_json::to_vec` for a single 32-MiB string is also a CPU spike,
+/// so we lean further back at 16 MiB. On a high-bandwidth VPS (1 Gbps+)
+/// the reader task can stuff the per-session buffer with tens of MiB
+/// between polls (issue #460); without this cap, `drain_now` would take
+/// the lot, the response would exceed Apps Script's ceiling, the body
+/// would be truncated mid-base64, and the client would fail JSON parse
+/// with `EOF while parsing a string at line 1 column ~52428685`. By
+/// returning at most this many bytes per drain and leaving the rest in
+/// the read buffer for the next poll, we keep responses comfortably
+/// under the cap and let throughput recover across batches.
+const TCP_DRAIN_MAX_BYTES: usize = 16 * 1024 * 1024;
+
 /// First queue-drop on a session always logs at warn level; subsequent
 /// drops log at debug only every Nth occurrence so a single congested
 /// session can't flood the operator's log.
@@ -324,13 +340,33 @@ async fn udp_reader_task(socket: Arc<UdpSocket>, session: Arc<UdpSessionInner>) 
     }
 }
 
-/// Drain whatever is currently buffered — no waiting.
-/// Used by batch mode where we poll frequently.
+/// Drain up to `TCP_DRAIN_MAX_BYTES` from the per-session read buffer —
+/// no waiting. Used by batch mode where we poll frequently.
+///
+/// If the buffer is larger than the cap, we return a prefix of the
+/// data and leave the remainder in the buffer for the next poll. The
+/// cap exists to keep batch responses under Apps Script's ~50 MiB body
+/// ceiling on high-bandwidth VPS — see `TCP_DRAIN_MAX_BYTES` for the
+/// underlying issue (#460).
+///
+/// `eof` is reported as true only when the buffer has been fully
+/// drained AND upstream has signaled EOF — otherwise a partial drain
+/// would prematurely tear the session down on the client side.
 async fn drain_now(session: &SessionInner) -> (Vec<u8>, bool) {
     let mut buf = session.read_buf.lock().await;
-    let data = std::mem::take(&mut *buf);
-    let eof = session.eof.load(Ordering::Acquire);
-    (data, eof)
+    let raw_eof = session.eof.load(Ordering::Acquire);
+    if buf.len() <= TCP_DRAIN_MAX_BYTES {
+        let data = std::mem::take(&mut *buf);
+        (data, raw_eof)
+    } else {
+        // Take the prefix; leave the tail in the buffer.
+        let tail = buf.split_off(TCP_DRAIN_MAX_BYTES);
+        let head = std::mem::replace(&mut *buf, tail);
+        // Don't propagate eof yet — buffer still has data even if upstream
+        // has closed. The client will get eof on the drain that returns
+        // an empty (or sub-cap) buffer.
+        (head, false)
+    }
 }
 
 /// Block until *any* of `inners` has buffered data, hits EOF, or the
@@ -1588,6 +1624,61 @@ mod tests {
             last_active: Mutex::new(Instant::now()),
             notify: Notify::new(),
         })
+    }
+
+    #[tokio::test]
+    async fn drain_now_caps_at_tcp_drain_max_bytes() {
+        // Issue #460: a 1 Gbps VPS reader fills the buffer with tens of MiB
+        // between polls; drain_now used to take the lot, the JSON response
+        // exceeded Apps Script's body cap, and the client failed JSON parse.
+        // The cap leaves the tail in the buffer for the next drain.
+        let inner = fake_inner().await;
+        let oversized = TCP_DRAIN_MAX_BYTES + 4096;
+        inner.read_buf.lock().await.resize(oversized, 0xab);
+
+        let (first, eof) = drain_now(&inner).await;
+        assert_eq!(first.len(), TCP_DRAIN_MAX_BYTES);
+        assert!(!eof, "shouldn't propagate eof while buffer still has data");
+
+        // Tail remains for the next poll.
+        assert_eq!(inner.read_buf.lock().await.len(), 4096);
+
+        let (second, _) = drain_now(&inner).await;
+        assert_eq!(second.len(), 4096);
+        assert!(inner.read_buf.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn drain_now_passes_through_when_under_cap() {
+        let inner = fake_inner().await;
+        inner.read_buf.lock().await.extend_from_slice(b"hello world");
+
+        let (data, eof) = drain_now(&inner).await;
+        assert_eq!(data, b"hello world");
+        assert!(!eof);
+        assert!(inner.read_buf.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn drain_now_holds_eof_until_buffer_drained() {
+        // If upstream signals EOF while the buffer is still oversized, we
+        // must drain the head, leave the tail, and *not* set eof yet.
+        // Eof flips on the final drain that returns a sub-cap buffer.
+        let inner = fake_inner().await;
+        inner.eof.store(true, Ordering::Release);
+        inner
+            .read_buf
+            .lock()
+            .await
+            .resize(TCP_DRAIN_MAX_BYTES + 100, 0);
+
+        let (head, head_eof) = drain_now(&inner).await;
+        assert_eq!(head.len(), TCP_DRAIN_MAX_BYTES);
+        assert!(!head_eof, "premature eof would tear the session");
+
+        let (tail, tail_eof) = drain_now(&inner).await;
+        assert_eq!(tail.len(), 100);
+        assert!(tail_eof, "eof finally flips when buffer is drained");
     }
 
     #[tokio::test]
