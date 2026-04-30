@@ -1,6 +1,6 @@
 package com.therealaleph.mhrv.ui.components
 
-import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
@@ -17,22 +17,17 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.therealaleph.mhrv.R
-import com.therealaleph.mhrv.HealthState
-import com.therealaleph.mhrv.VpnHealthState
 import com.therealaleph.mhrv.VpnState
 import com.therealaleph.mhrv.ui.theme.ConnectedGreen
 import com.therealaleph.mhrv.ui.theme.ConnectingAmber
 import com.therealaleph.mhrv.ui.theme.DisconnectedGray
-import com.therealaleph.mhrv.ui.theme.ErrRed
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 
 private enum class ConnectButtonState {
     DISCONNECTED,
     STARTING,
-    VERIFYING,
     CONNECTED,
-    FAILED,
     STOPPING
 }
 
@@ -41,10 +36,10 @@ private enum class ConnectButtonState {
 fun ConnectButton(
     onStart: () -> Boolean,
     onStop: () -> Unit,
-    enabled: Boolean = true
+    enabled: Boolean = true,
+    uptimeDisplay: String = ""
 ) {
     val isRunning by VpnState.isRunning.collectAsState()
-    val healthState by VpnHealthState.healthState.collectAsState()
     var awaitingRunning by remember { mutableStateOf<Boolean?>(null) }
     val transitioning = awaitingRunning != null
 
@@ -62,18 +57,13 @@ fun ConnectButton(
     val state = when {
         awaitingRunning == true -> ConnectButtonState.STARTING
         awaitingRunning == false -> ConnectButtonState.STOPPING
-        isRunning -> when (healthState) {
-            HealthState.VERIFYING, HealthState.UNKNOWN -> ConnectButtonState.VERIFYING
-            HealthState.HEALTHY -> ConnectButtonState.CONNECTED
-            HealthState.UNHEALTHY, HealthState.NEEDS_CERTIFICATE -> ConnectButtonState.FAILED
-        }
+        isRunning -> ConnectButtonState.CONNECTED
         else -> ConnectButtonState.DISCONNECTED
     }
 
     val targetColor = when (state) {
-        ConnectButtonState.STARTING, ConnectButtonState.VERIFYING -> ConnectingAmber
+        ConnectButtonState.STARTING -> ConnectingAmber
         ConnectButtonState.CONNECTED -> ConnectedGreen
-        ConnectButtonState.FAILED -> ErrRed
         ConnectButtonState.STOPPING, ConnectButtonState.DISCONNECTED -> {
             if (!enabled) DisconnectedGray.copy(alpha = 0.5f) else DisconnectedGray
         }
@@ -96,11 +86,30 @@ fun ConnectButton(
         label = "RotationAngle"
     )
 
+    val pulseScale by infiniteTransition.animateFloat(
+        initialValue = 1f,
+        targetValue = 1.3f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(2500, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "PulseScale"
+    )
+    val pulseAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.5f,
+        targetValue = 0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(2500, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "PulseAlpha"
+    )
+
     Box(
         modifier = Modifier.size(200.dp),
         contentAlignment = Alignment.Center
     ) {
-        if (state == ConnectButtonState.STARTING || state == ConnectButtonState.VERIFYING) {
+        if (state == ConnectButtonState.STARTING) {
             Canvas(modifier = Modifier.fillMaxSize()) {
                 drawArc(
                     color = ConnectingAmber,
@@ -110,26 +119,43 @@ fun ConnectButton(
                     style = Stroke(width = 4.dp.toPx(), cap = StrokeCap.Round)
                 )
             }
+        } else if (state == ConnectButtonState.CONNECTED) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                drawCircle(
+                    color = ConnectedGreen,
+                    radius = (160.dp.toPx() / 2f) * pulseScale,
+                    alpha = pulseAlpha
+                )
+            }
         }
 
-        Surface(
-            onClick = {
-                if (transitioning) return@Surface
-                if (isRunning) {
-                    awaitingRunning = false
-                    onStop()
-                } else {
-                    if (onStart()) {
-                        awaitingRunning = true
-                    }
+    val elevation by animateDpAsState(
+        targetValue = if (isRunning && enabled) 12.dp else 2.dp,
+        animationSpec = tween(durationMillis = 600),
+        label = "ButtonElevation"
+    )
+
+
+
+    Surface(
+        onClick = {
+            if (transitioning || !enabled) return@Surface
+            if (isRunning) {
+                awaitingRunning = false
+                onStop()
+            } else {
+                if (onStart()) {
+                    awaitingRunning = true
                 }
-            },
-            shape = CircleShape,
-            color = animatedColor,
-            modifier = Modifier.size(160.dp),
-            shadowElevation = if (isRunning && enabled) 8.dp else 2.dp,
-            tonalElevation = if (isRunning && enabled) 8.dp else 2.dp
-        ) {
+            }
+        },
+        enabled = enabled,
+        shape = CircleShape,
+        color = animatedColor,
+        modifier = Modifier.size(160.dp),
+        shadowElevation = elevation,
+        tonalElevation = elevation
+    ) {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
@@ -141,15 +167,21 @@ fun ConnectButton(
                     tint = Color.White
                 )
                 Spacer(Modifier.height(8.dp))
-                Text(
-                    text = when (state) {
+                AnimatedContent(
+                    targetState = when (state) {
                         ConnectButtonState.STARTING, ConnectButtonState.STOPPING -> stringResource(R.string.status_wait)
                         ConnectButtonState.DISCONNECTED -> stringResource(R.string.btn_connect)
-                        else -> stringResource(R.string.btn_disconnect)
+                        else -> uptimeDisplay.ifBlank { stringResource(R.string.btn_disconnect) }
                     },
-                    style = MaterialTheme.typography.titleMedium,
-                    color = Color.White
-                )
+                    transitionSpec = { fadeIn() togetherWith fadeOut() },
+                    label = "ButtonText"
+                ) { targetText ->
+                    Text(
+                        text = targetText,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = Color.White
+                    )
+                }
             }
         }
     }

@@ -13,18 +13,24 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.therealaleph.mhrv.*
 import com.therealaleph.mhrv.ui.components.*
+import com.therealaleph.mhrv.ui.components.formatDuration
 import com.therealaleph.mhrv.R
 import com.therealaleph.mhrv.ui.CaInstallOutcome
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.compose.animation.*
+import androidx.compose.animation.core.*
 import com.therealaleph.mhrv.ui.screens.UnlockSheet
+import kotlinx.coroutines.delay
+import org.json.JSONObject
 
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalAnimationApi::class)
 @Composable
 fun NewHomeScreen(
     onStart: () -> Unit,
@@ -41,6 +47,40 @@ fun NewHomeScreen(
     val isRunning by VpnState.isRunning.collectAsState()
     val healthState by VpnHealthState.healthState.collectAsState()
     val verificationProgress by VpnHealthState.verificationProgress.collectAsState()
+    val connectedSince by VpnState.connectedSince.collectAsState()
+    val handle by VpnState.proxyHandle.collectAsState()
+    var statsJson by remember { mutableStateOf("") }
+    val todayCalls = remember(statsJson) {
+        if (statsJson.isBlank()) 0L
+        else runCatching { JSONObject(statsJson).optLong("today_calls", 0L) }.getOrDefault(0L)
+    }
+    var uptimeDisplay by remember { mutableStateOf("") }
+    var checkJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+
+    LaunchedEffect(isRunning, connectedSince) {
+        if (isRunning && connectedSince != null) {
+            while (true) {
+                val secs = (System.currentTimeMillis() - connectedSince!!) / 1000
+                uptimeDisplay = formatDuration(secs)
+                delay(1000)
+            }
+        } else {
+            uptimeDisplay = ""
+        }
+    }
+
+    LaunchedEffect(handle) {
+        if (handle != 0L) {
+            while (true) {
+                statsJson = withContext(Dispatchers.IO) {
+                    runCatching { Native.statsJson(handle) }.getOrDefault("")
+                }
+                delay(1000)
+            }
+        } else {
+            statsJson = ""
+        }
+    }
 
     val sheetState = rememberModalBottomSheetState()
     var showUnlockSheet by remember { mutableStateOf(false) }
@@ -56,25 +96,16 @@ fun NewHomeScreen(
 
     LaunchedEffect(isRunning, cfg.mode) {
         if (isRunning) {
-            if (healthState == HealthState.UNKNOWN) {
-                // If in Relay mode, check if certificate is installed first
-                if (cfg.mode == Mode.APPS_SCRIPT) {
-                    val fingerprint = withContext(Dispatchers.IO) { CaInstall.fingerprint(ctx) }
-                    if (fingerprint == null || !CaInstall.isInstalled(fingerprint)) {
-                        VpnHealthState.setHealthState(HealthState.NEEDS_CERTIFICATE)
-                        return@LaunchedEffect
-                    }
+            if (cfg.mode == Mode.APPS_SCRIPT) {
+                val fingerprint = withContext(Dispatchers.IO) { CaInstall.fingerprint(ctx) }
+                if (fingerprint == null || !CaInstall.isInstalled(fingerprint)) {
+                    VpnHealthState.setHealthState(HealthState.NEEDS_CERTIFICATE)
+                    return@LaunchedEffect
                 }
-
-                VpnHealthState.setHealthState(HealthState.VERIFYING)
-                val isHealthy = ConnectionTester.verifyConnection(
-                    mode = cfg.mode, 
-                    proxyPort = cfg.listenPort,
-                    onProgress = { current, total ->
-                        VpnHealthState.setVerificationProgress(ctx.getString(R.string.status_attempt_prefix, current, total))
-                    }
-                )
-                VpnHealthState.setHealthState(if (isHealthy) HealthState.HEALTHY else HealthState.UNHEALTHY)
+            }
+            // Reset to UNKNOWN — user decides if/when to check
+            if (healthState == HealthState.UNKNOWN) {
+                // Stay unknown — no auto-verification
             }
         } else {
             VpnHealthState.reset()
@@ -115,225 +146,344 @@ fun NewHomeScreen(
         },
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { inner ->
-        Column(
-            modifier = Modifier
-                .padding(inner)
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(24.dp)
-        ) {
-            val isConfigMissing = cfg.mode != Mode.GOOGLE_ONLY && (!cfg.hasDeploymentId || cfg.authKey.isBlank())
+        Box(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .padding(inner)
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                val isConfigMissing = cfg.mode != Mode.DIRECT && (!cfg.hasDeploymentId || cfg.authKey.isBlank())
 
-            if (SecretsManager.isUpdatePending(ctx)) {
-                Surface(
-                    onClick = { showUnlockSheet = true },
-                    modifier = Modifier.fillMaxWidth(),
-                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.15f),
-                    shape = MaterialTheme.shapes.small
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Text(
-                            stringResource(R.string.banner_update_desc),
-                            style = MaterialTheme.typography.labelSmall,
-                            modifier = Modifier.weight(1f),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        TextButton(
-                            onClick = { showUnlockSheet = true },
-                            modifier = Modifier.height(32.dp),
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-                        ) {
-                            Text(
-                                stringResource(R.string.banner_btn_apply),
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.Bold
-                            )
+                UpdateBanner(
+                    isPending = SecretsManager.isUpdatePending(ctx),
+                    onClick = { showUnlockSheet = true }
+                )
+
+                ModeIndicator(
+                    mode = cfg.mode,
+                    onModeChanged = { newMode ->
+                        cfg = cfg.copy(mode = newMode)
+                        ConfigStore.save(ctx, cfg)
+                    },
+                    enabled = !isRunning,
+                )
+
+                ConnectionArea(
+                    isRunning = isRunning,
+                    isConfigMissing = isConfigMissing,
+                    healthState = healthState,
+                    verificationProgress = verificationProgress,
+                    todayCalls = todayCalls,
+                    uptimeDisplay = uptimeDisplay,
+                    onStart = {
+                        if (isConfigMissing) {
+                            scope.launch {
+                                snackbarHostState.showSnackbar(
+                                    ctx.getString(R.string.err_config_required),
+                                    withDismissAction = true
+                                )
+                            }
+                            return@ConnectionArea false
                         }
-                    }
-                }
-            }
 
-            ModeIndicator(
-                mode = cfg.mode,
-                onModeChanged = { newMode ->
-                    cfg = cfg.copy(mode = newMode)
-                    ConfigStore.save(ctx, cfg)
-                },
-                enabled = !isRunning,
-            )
-
-            Spacer(Modifier.height(8.dp))
-
-            ConnectButton(
-                enabled = isRunning || !isConfigMissing,
-                onStart = {
-                    if (isConfigMissing) {
                         scope.launch {
-                            snackbarHostState.showSnackbar(
-                                ctx.getString(R.string.err_config_required),
-                                withDismissAction = true
-                            )
-                        }
-                        return@ConnectButton false
-                    }
-
-                    scope.launch {
-                        var updated = cfg
-                        if (updated.googleIp.isBlank()) {
-                            val fresh = withContext(Dispatchers.IO) {
-                                NetworkDetect.resolveGoogleIp()
+                            var updated = cfg
+                            if (updated.googleIp.isBlank()) {
+                                val fresh = withContext(Dispatchers.IO) {
+                                    NetworkDetect.resolveGoogleIp()
+                                }
+                                if (!fresh.isNullOrBlank()) {
+                                    updated = updated.copy(googleIp = fresh)
+                                }
                             }
-                            if (!fresh.isNullOrBlank()) {
-                                updated = updated.copy(googleIp = fresh)
+                            if (updated.frontDomain.isBlank() || 
+                                updated.frontDomain.any { it.isDigit() || it == '.' || it == ':' }
+                            ) {
+                                updated = updated.copy(frontDomain = "www.google.com")
                             }
-                        }
-                        // Reuse the repair logic for front_domain
-                        if (updated.frontDomain.isBlank() || 
-                            updated.frontDomain.any { it.isDigit() || it == '.' || it == ':' }
-                        ) {
-                            updated = updated.copy(frontDomain = "www.google.com")
-                        }
-                        
-                        if (updated !== cfg) {
-                            cfg = updated
-                            ConfigStore.save(ctx, updated)
-                        }
-                        onStart()
-                    }
-                    true
-                },
-                onStop = onStop
-            )
-
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Box(
-                    modifier = Modifier.fillMaxWidth(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = when {
-                            isRunning && healthState == HealthState.NEEDS_CERTIFICATE -> stringResource(R.string.status_needs_certificate)
-                            isRunning && (healthState == HealthState.VERIFYING || healthState == HealthState.UNKNOWN) -> stringResource(R.string.status_verifying)
-                            isRunning && healthState == HealthState.UNHEALTHY -> stringResource(R.string.status_connected_no_internet)
-                            isRunning && healthState == HealthState.HEALTHY -> {
-                                if (cfg.mode == Mode.GOOGLE_ONLY) stringResource(R.string.status_protected_google_only)
-                                else stringResource(R.string.status_protected)
+                            if (updated !== cfg) {
+                                cfg = updated
+                                ConfigStore.save(ctx, updated)
                             }
-                            isRunning -> stringResource(R.string.status_verifying) // Fallback for transition
-                            isConfigMissing -> stringResource(R.string.status_config_incomplete)
-                            else -> stringResource(R.string.status_not_connected)
-                        },
-                        style = MaterialTheme.typography.titleMedium,
-                        color = when {
-                            isRunning && healthState == HealthState.NEEDS_CERTIFICATE -> MaterialTheme.colorScheme.error
-                            isRunning && (healthState == HealthState.VERIFYING || healthState == HealthState.UNKNOWN) -> com.therealaleph.mhrv.ui.theme.ConnectingAmber
-                            isRunning && healthState == HealthState.UNHEALTHY -> com.therealaleph.mhrv.ui.theme.ErrRed
-                            isRunning && healthState == HealthState.HEALTHY -> com.therealaleph.mhrv.ui.theme.OkGreen
-                            isRunning -> com.therealaleph.mhrv.ui.theme.ConnectingAmber
-                            isConfigMissing -> MaterialTheme.colorScheme.error
-                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                            onStart()
                         }
-                    )
-                    
-                    if (isRunning && healthState != HealthState.VERIFYING) {
-                        IconButton(
-                            onClick = {
-                                scope.launch {
-                                    if (cfg.mode == Mode.APPS_SCRIPT) {
-                                        val fingerprint = withContext(Dispatchers.IO) { CaInstall.fingerprint(ctx) }
-                                        if (fingerprint == null || !CaInstall.isInstalled(fingerprint)) {
-                                            VpnHealthState.setHealthState(HealthState.NEEDS_CERTIFICATE)
-                                            return@launch
-                                        }
+                        true
+                    },
+                    onStop = onStop,
+                    onCheckConnection = {
+                        if (checkJob?.isActive == true) {
+                            checkJob?.cancel()
+                            VpnHealthState.setHealthState(HealthState.UNKNOWN)
+                        } else {
+                            checkJob = scope.launch {
+                                if (cfg.mode == Mode.APPS_SCRIPT) {
+                                    val fingerprint = withContext(Dispatchers.IO) { CaInstall.fingerprint(ctx) }
+                                    if (fingerprint == null || !CaInstall.isInstalled(fingerprint)) {
+                                        VpnHealthState.setHealthState(HealthState.NEEDS_CERTIFICATE)
+                                        return@launch
                                     }
-                                    VpnHealthState.setHealthState(HealthState.VERIFYING)
+                                }
+                                VpnHealthState.setHealthState(HealthState.VERIFYING)
+                                try {
                                     val isHealthy = ConnectionTester.verifyConnection(
-                                        mode = cfg.mode, 
+                                        mode = cfg.mode,
                                         proxyPort = cfg.listenPort,
                                         onProgress = { current, total ->
                                             VpnHealthState.setVerificationProgress(ctx.getString(R.string.status_attempt_prefix, current, total))
                                         }
                                     )
                                     VpnHealthState.setHealthState(if (isHealthy) HealthState.HEALTHY else HealthState.UNHEALTHY)
+                                } catch (_: kotlinx.coroutines.CancellationException) {
+                                    VpnHealthState.setHealthState(HealthState.UNKNOWN)
                                 }
-                            },
-                            modifier = Modifier
-                                .align(Alignment.CenterEnd)
-                                .size(32.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Refresh,
-                                contentDescription = stringResource(R.string.btn_verify_connection),
-                                modifier = Modifier.size(18.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                            )
+                            }
                         }
                     }
-                }
-                
-                if (isRunning && healthState == HealthState.VERIFYING) {
-                    verificationProgress?.let {
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            text = it,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = com.therealaleph.mhrv.ui.theme.ConnectingAmber.copy(alpha = 0.8f)
+                )
+
+                Spacer(Modifier.height(20.dp))
+
+                // Visibility managed with default animations
+                AnimatedVisibility(
+                    visible = isRunning,
+                    enter = expandVertically(animationSpec = tween(300)) + fadeIn(animationSpec = tween(300)),
+                    exit = shrinkVertically(animationSpec = tween(300)) + fadeOut(animationSpec = tween(300))
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        LiveStatsCard(statsJson = statsJson)
+                        ProxyShareCard(
+                            httpPort = cfg.listenPort,
+                            socks5Port = cfg.socks5Port ?: (cfg.listenPort + 1)
                         )
                     }
                 }
 
-                if (isConfigMissing || (isRunning && healthState == HealthState.NEEDS_CERTIFICATE)) {
-                    Text(
-                        text = if (healthState == HealthState.NEEDS_CERTIFICATE) stringResource(R.string.help_install_cert_sub)
-                               else stringResource(R.string.help_config_required_sub),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.error.copy(alpha = 0.7f)
+                AnimatedVisibility(
+                    visible = cfg.mode == Mode.APPS_SCRIPT,
+                    enter = expandVertically(animationSpec = tween(300)) + fadeIn(animationSpec = tween(300)),
+                    exit = shrinkVertically(animationSpec = tween(300)) + fadeOut(animationSpec = tween(300))
+                ) {
+                    CertActionCard(onInstallClick = onInstallCaConfirmed)
+                }
+
+                GoogleIpCard(
+                    cfg = cfg,
+                    onUpdate = { 
+                        cfg = it
+                        ConfigStore.save(ctx, it)
+                    }
+                )
+            }
+
+            if (showUnlockSheet) {
+                ModalBottomSheet(
+                    onDismissRequest = { showUnlockSheet = false },
+                    sheetState = sheetState,
+                    dragHandle = { BottomSheetDefaults.DragHandle() },
+                ) {
+                    UnlockSheet(
+                        isUpdate = SecretsManager.hasUnlockedSecrets(ctx),
+                        onUnlocked = {
+                            val updated = SecretsManager.forceApplySecrets(ctx, ConfigStore.load(ctx))
+                            ConfigStore.save(ctx, updated)
+                            cfg = updated 
+                            showUnlockSheet = false
+                        },
+                        onSkip = {
+                            SecretsManager.skipUpdate(ctx)
+                            showUnlockSheet = false
+                        }
                     )
                 }
             }
+        }
+    }
+}
 
-            LiveStatsCard()
-
-            if (cfg.mode == Mode.APPS_SCRIPT) {
-                CertActionCard(onInstallClick = onInstallCaConfirmed)
-            }
-
-            // Compact connectivity check row — no card wrapper needed
-            GoogleIpCard(
-                cfg = cfg,
-                onUpdate = { 
-                    cfg = it
-                    ConfigStore.save(ctx, it)
+@OptIn(ExperimentalAnimationApi::class)
+@Composable
+private fun UpdateBanner(
+    isPending: Boolean,
+    onClick: () -> Unit
+) {
+    AnimatedVisibility(
+        visible = isPending,
+        enter = expandVertically() + fadeIn(),
+        exit = shrinkVertically() + fadeOut()
+    ) {
+        Surface(
+            onClick = onClick,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 8.dp),
+            color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.15f),
+            shape = MaterialTheme.shapes.small
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    stringResource(R.string.banner_update_desc),
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.weight(1f),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                TextButton(
+                    onClick = onClick,
+                    modifier = Modifier.height(32.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                ) {
+                    Text(
+                        stringResource(R.string.banner_btn_apply),
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalAnimationApi::class)
+@Composable
+private fun ConnectionArea(
+    isRunning: Boolean,
+    isConfigMissing: Boolean,
+    healthState: HealthState,
+    verificationProgress: String?,
+    todayCalls: Long,
+    uptimeDisplay: String,
+    onStart: () -> Boolean,
+    onStop: () -> Unit,
+    onCheckConnection: () -> Unit
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            ConnectButton(
+                enabled = isRunning || !isConfigMissing,
+                uptimeDisplay = uptimeDisplay,
+                onStart = onStart,
+                onStop = onStop
             )
+
+            AnimatedContent(
+                targetState = Triple(isRunning, healthState, isConfigMissing),
+                transitionSpec = { fadeIn() togetherWith fadeOut() },
+                label = "StatusText"
+            ) { state ->
+                val (running, health, missing) = state
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = when {
+                            running && health == HealthState.NEEDS_CERTIFICATE -> stringResource(R.string.status_needs_certificate)
+                            running -> stringResource(R.string.label_requests_sent, todayCalls)
+                            missing -> stringResource(R.string.status_config_incomplete)
+                            else -> ""
+                        },
+                        style = MaterialTheme.typography.titleMedium,
+                        color = when {
+                            running && health == HealthState.NEEDS_CERTIFICATE -> MaterialTheme.colorScheme.error
+                            running -> com.therealaleph.mhrv.ui.theme.OkGreen
+                            missing -> MaterialTheme.colorScheme.error
+                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                        }
+                    )
+                    if (missing) {
+                        Text(
+                            text = stringResource(R.string.help_config_required_sub),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error.copy(alpha = 0.7f)
+                        )
+                    }
+                }
+            }
         }
 
-        if (showUnlockSheet) {
-            ModalBottomSheet(
-                onDismissRequest = { showUnlockSheet = false },
-                sheetState = sheetState,
-                dragHandle = { BottomSheetDefaults.DragHandle() },
-            ) {
-                UnlockSheet(
-                    isUpdate = SecretsManager.hasUnlockedSecrets(ctx),
-                    onUnlocked = {
-                        // Force apply the newly unlocked secrets to the persistent config.
-                        val updated = SecretsManager.forceApplySecrets(ctx, ConfigStore.load(ctx))
-                        ConfigStore.save(ctx, updated)
-                        cfg = updated // Sync local state
-                        showUnlockSheet = false
-                    },
-                    onSkip = {
-                        SecretsManager.skipUpdate(ctx)
-                        showUnlockSheet = false
+        AnimatedVisibility(
+            visible = isRunning,
+            enter = slideInVertically { it / 2 } + fadeIn(),
+            exit = slideOutVertically { it / 2 } + fadeOut()
+        ) {
+            OutlinedButton(
+                onClick = onCheckConnection,
+                modifier = Modifier.height(36.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    when (healthState) {
+                        HealthState.HEALTHY -> com.therealaleph.mhrv.ui.theme.OkGreen.copy(alpha = 0.5f)
+                        HealthState.UNHEALTHY, HealthState.VERIFYING -> com.therealaleph.mhrv.ui.theme.ConnectingAmber.copy(alpha = 0.5f)
+                        else -> MaterialTheme.colorScheme.outline
                     }
                 )
+            ) {
+                AnimatedContent(
+                    targetState = healthState,
+                    transitionSpec = {
+                        fadeIn() togetherWith fadeOut()
+                    },
+                    label = "HealthCheckContent"
+                ) { targetState ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        when (targetState) {
+                            HealthState.VERIFYING -> {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(14.dp),
+                                    strokeWidth = 2.dp,
+                                    color = com.therealaleph.mhrv.ui.theme.ConnectingAmber
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    text = verificationProgress ?: stringResource(R.string.status_verifying),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = com.therealaleph.mhrv.ui.theme.ConnectingAmber
+                                )
+                            }
+                            HealthState.HEALTHY -> {
+                                Icon(Icons.Default.Refresh, null, modifier = Modifier.size(14.dp), tint = com.therealaleph.mhrv.ui.theme.OkGreen)
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    text = stringResource(R.string.status_check_passed),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = com.therealaleph.mhrv.ui.theme.OkGreen
+                                )
+                            }
+                            HealthState.UNHEALTHY -> {
+                                Icon(Icons.Default.Refresh, null, modifier = Modifier.size(14.dp), tint = com.therealaleph.mhrv.ui.theme.ConnectingAmber)
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    text = stringResource(R.string.status_connected_no_internet),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = com.therealaleph.mhrv.ui.theme.ConnectingAmber
+                                )
+                            }
+                            else -> {
+                                Icon(
+                                    imageVector = Icons.Default.Refresh,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    text = stringResource(R.string.btn_check_connection),
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
     }

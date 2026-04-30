@@ -27,8 +27,8 @@ object ConnectionTester {
         retries: Int = 5,
         onProgress: ((Int, Int) -> Unit)? = null
     ): Boolean = withContext(Dispatchers.IO) {
-        // For GOOGLE_ONLY mode, we don't perform a connection test
-        if (mode == Mode.GOOGLE_ONLY) {
+        // For DIRECT mode, we don't perform a connection test
+        if (mode == Mode.DIRECT) {
             return@withContext true
         }
 

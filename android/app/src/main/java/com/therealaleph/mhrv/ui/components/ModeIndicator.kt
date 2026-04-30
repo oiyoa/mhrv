@@ -1,7 +1,7 @@
 package com.therealaleph.mhrv.ui.components
 
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.*
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -32,9 +32,9 @@ private data class ModeOption(
 
 private val modeOptions = listOf(
     ModeOption(
-        mode = Mode.GOOGLE_ONLY,
-        label = "Google Only",
-        shortLabel = "Google",
+        mode = Mode.DIRECT,
+        label = "Direct",
+        shortLabel = "Direct",
         icon = { color ->
             Text(
                 text = "G",
@@ -110,20 +110,30 @@ fun ModeIndicator(
                 val bgColor by animateColorAsState(
                     targetValue = if (selected) activeAccent.copy(alpha = 0.18f)
                     else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
-                    animationSpec = tween(300),
+                    animationSpec = tween(200),
                     label = "ModeBg${option.mode}",
                 )
                 val contentColor by animateColorAsState(
                     targetValue = if (selected) activeAccent
                     else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                    animationSpec = tween(300),
+                    animationSpec = tween(200),
                     label = "ModeFg${option.mode}",
                 )
                 val borderColor by animateColorAsState(
                     targetValue = if (selected) activeAccent.copy(alpha = 0.6f)
                     else Color.Transparent,
-                    animationSpec = tween(300),
+                    animationSpec = tween(200),
                     label = "ModeBorder${option.mode}",
+                )
+                val elevation by animateDpAsState(
+                    targetValue = if (selected) 4.dp else 0.dp,
+                    animationSpec = tween(200),
+                    label = "ModeElevation${option.mode}"
+                )
+                val borderWidth by animateDpAsState(
+                    targetValue = if (selected) 1.5.dp else 0.dp,
+                    animationSpec = tween(200),
+                    label = "ModeBorderWidth${option.mode}"
                 )
 
                 val weight = if (isMiddle) 1.2f else 0.9f
@@ -138,8 +148,9 @@ fun ModeIndicator(
                         .height(height),
                     shape = RoundedCornerShape(12.dp),
                     color = bgColor,
-                    border = if (selected) BorderStroke(1.5.dp, borderColor) else null,
-                    tonalElevation = if (selected) 4.dp else 0.dp,
+                    border = if (selected) BorderStroke(borderWidth, borderColor) else null,
+                    shadowElevation = elevation,
+                    tonalElevation = elevation,
                 ) {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
@@ -172,22 +183,28 @@ fun ModeIndicator(
         // Descriptive subtitle for current mode
         val description = when (mode) {
             Mode.APPS_SCRIPT -> stringResource(R.string.mode_desc_apps_script)
-            Mode.GOOGLE_ONLY -> stringResource(R.string.mode_desc_google_only)
+            Mode.DIRECT -> stringResource(R.string.mode_desc_direct)
             Mode.FULL -> stringResource(R.string.mode_desc_full)
         }
-        Surface(
-            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f),
-            shape = RoundedCornerShape(16.dp),
-            modifier = Modifier.padding(horizontal = 24.dp)
-        ) {
-            Text(
-                text = description,
-                style = MaterialTheme.typography.bodySmall,
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
-            )
+        AnimatedContent(
+            targetState = description,
+            transitionSpec = { fadeIn() togetherWith fadeOut() },
+            label = "ModeDescription"
+        ) { targetDesc ->
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.padding(horizontal = 24.dp)
+            ) {
+                Text(
+                    text = targetDesc,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                )
+            }
         }
     }
 }

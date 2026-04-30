@@ -111,17 +111,23 @@
     <string name="usage_resets_hm">%1$dh %2$dm</string>
     <string name="btn_view_quota_on_google">View quota on Google →</string>
     <string name="usage_today_note">Estimate — this is what this device relayed. Google\'s dashboard has the authoritative number.</string>
+    <string name="unit_gb">GB</string>
+    <string name="unit_mb">MB</string>
+    <string name="unit_kb">KB</string>
+    <string name="unit_b">B</string>
 
     <!-- "How to use" guide body. Localized — FA copy lives in values-fa. -->
     <string name="help_how_to_use">1. Paste one or more Apps Script deployment URLs (or bare IDs) and your auth_key.\n2. Tap Install MITM certificate. Confirm the dialog — the cert is saved to Downloads/mhrv-ca.crt and the Settings app opens. Use Settings\' search bar to find \"CA certificate\", tap that result (NOT \"VPN &amp; app user certificate\" or \"Wi-Fi\"), and pick mhrv-ca.crt from Downloads. You\'ll be asked to set a screen lock if you don\'t have one (Android requirement).\n3. Before tapping Start, expand \"SNI pool + tester\" and hit \"Test all\". If every entry times out, your google_ip is unreachable — replace it with one that resolves locally (e.g. `nslookup www.google.com` on any working device).\n4. Tap Start. Accept the VPN prompt. The full TUN bridge routes every app on the device through the proxy — no per-app setup needed.\n5. If Chrome shows \"504 Relay timeout\": your Apps Script deployment isn\'t responding. Redeploy the script, grab the new /exec URL, and paste it above. Watch Live logs for \"Relay timeout\" vs \"connect:\" errors to tell which layer is failing.\n\nKnown limitation — Cloudflare Turnstile (\"Verify you are human\") will loop endlessly on most CF-protected sites. Every Apps Script request uses a rotating Google-datacenter egress IP + a fixed \"Google-Apps-Script\" User-Agent + a Google TLS fingerprint. The cf_clearance cookie is bound to the (IP, UA, JA3) tuple the challenge was solved against, so the NEXT request — from a different egress IP — gets re-challenged. Nothing in this app can fix that; it\'s inherent to Apps Script as a relay. Sites that only gate the initial page load (not every request) will work after one solve.</string>
     <string name="status_protected">Connected</string>
-    <string name="status_protected_google_only">Connected (Google Only)</string>
+    <string name="status_protected_direct">Connected (Direct)</string>
     <string name="status_not_connected">Not Connected</string>
     <string name="status_config_incomplete">Configuration Incomplete</string>
-    <string name="status_verifying">Verifying…</string>
-    <string name="status_connected_no_internet">No Internet Access</string>
+    <string name="status_verifying">Checking…</string>
+    <string name="status_connected_no_internet">Check failed — try browsing</string>
     <string name="status_needs_certificate">Certificate Required</string>
     <string name="btn_verify_connection">Verify Connection</string>
+    <string name="btn_check_connection">Check Connection</string>
+    <string name="status_check_passed">Connection verified ✓</string>
     <string name="help_config_required_sub">Set Deployment IDs &amp; Auth Key in Settings</string>
     <string name="help_install_cert_sub">Install CA certificate to enable relay</string>
 
@@ -146,10 +152,19 @@
     <string name="unlock_err_invalid">Invalid password. Please try again.</string>
     <!-- Mode Descriptions -->
     <string name="mode_desc_full">Full tunnel for all apps and websites.</string>
-    <string name="mode_desc_google_only">Use this to reach Google services only.</string>
+    <string name="mode_desc_direct">Direct access for fronting groups (e.g. Google).</string>
     <string name="mode_desc_apps_script">Higher performance, needs a certificate.</string>
 
     <!-- Update Banner -->
     <string name="banner_update_desc">A newer VPN configuration is available.</string>
     <string name="banner_btn_apply">Apply Now</string>
+
+    <!-- Proxy Share -->
+    <string name="share_proxy_title">Share Proxy to Laptop</string>
+    <string name="share_proxy_http">HTTP</string>
+    <string name="share_proxy_socks5">SOCKS5</string>
+    <string name="share_proxy_hint">Connect your device to the same Wi-Fi or this phone\'s hotspot.</string>
+    <string name="share_proxy_copied">Copied</string>
+    <string name="sec_usage_stats">Usage Stats</string>
+    <string name="label_requests_sent">%1$d requests sent</string>
 </resources>

@@ -13,6 +13,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.therealaleph.mhrv.CaInstall
 import com.therealaleph.mhrv.ui.theme.OkGreen
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @Composable
 fun CertActionCard(
@@ -21,12 +23,15 @@ fun CertActionCard(
     val ctx = LocalContext.current
     var isInstalled by remember { mutableStateOf(false) }
     
-    // Periodically re-check (or on entry) if the cert is in the AndroidCAStore.
+    // Periodically re-check if the cert is in the AndroidCAStore.
+    // 5s is plenty for background polling; reduces CPU/disk I/O on slow devices.
     LaunchedEffect(Unit) {
+        val fp = withContext(Dispatchers.IO) { CaInstall.fingerprint(ctx) }
+        if (fp == null) return@LaunchedEffect
+        
         while (true) {
-            val fp = CaInstall.fingerprint(ctx)
-            isInstalled = fp?.let { CaInstall.isInstalled(it) } ?: false
-            kotlinx.coroutines.delay(3000)
+            isInstalled = withContext(Dispatchers.IO) { CaInstall.isInstalled(fp) }
+            kotlinx.coroutines.delay(5000)
         }
     }
 

@@ -1,9 +1,8 @@
 package com.therealaleph.mhrv.ui.components
 
 import android.widget.Toast
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.*
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
@@ -61,14 +60,13 @@ fun GoogleIpCard(
             connectedCount > 0 -> androidx.compose.ui.graphics.Color(0xFFFFA000) // Amber
             else -> ErrRed
         },
-        animationSpec = tween(400),
+        animationSpec = tween(300),
         label = "StatusColor",
     )
 
     Card(
         modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 8.dp),
+            .fillMaxWidth(),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
         ),
@@ -111,11 +109,17 @@ fun GoogleIpCard(
                             )
                             Spacer(Modifier.width(6.dp))
                         }
-                        Text(
-                            text = stringResource(statusTextRes),
-                            style = MaterialTheme.typography.titleSmall,
-                            color = titleColor
-                        )
+                        AnimatedContent(
+                            targetState = statusTextRes,
+                            transitionSpec = { fadeIn(tween(200)) togetherWith fadeOut(tween(200)) },
+                            label = "GoogleStatusText"
+                        ) { targetRes ->
+                            Text(
+                                text = stringResource(targetRes),
+                                style = MaterialTheme.typography.titleSmall,
+                                color = titleColor
+                            )
+                        }
                     }
                     Spacer(Modifier.height(2.dp))
                     Text(
