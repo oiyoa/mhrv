@@ -96,7 +96,7 @@ data class MhrvConfig(
     val verifySsl: Boolean = true,
     val logLevel: String = "info",
     val parallelRelay: Int = 1,
-    val coalesceStepMs: Int = 40,
+    val coalesceStepMs: Int = 10,
     val coalesceMaxMs: Int = 1000,
     val upstreamSocks5: String = "",
 
@@ -134,6 +134,13 @@ data class MhrvConfig(
     val splitMode: SplitMode = SplitMode.ALL,
     /** Package names used by ONLY and EXCEPT. Empty under ALL. */
     val splitApps: List<String> = emptyList(),
+
+    /**
+     * Route YouTube traffic through Apps Script relay instead of the
+     * SNI-rewrite tunnel. Avoids Google SafeSearch-on-SNI / restricted
+     * mode, but slower for video. Maps to Rust `youtube_via_relay`.
+     */
+    val youtubeViaRelay: Boolean = false,
 
     /** UI language toggle. Non-Rust; honoured only by the Android wrapper. */
     val uiLang: UiLang = UiLang.AUTO,
@@ -203,7 +210,7 @@ data class MhrvConfig(
             put("verify_ssl", verifySsl)
             put("log_level", logLevel)
             put("parallel_relay", parallelRelay)
-            if (coalesceStepMs != 40) put("coalesce_step_ms", coalesceStepMs)
+            if (coalesceStepMs != 10) put("coalesce_step_ms", coalesceStepMs)
             if (coalesceMaxMs != 1000) put("coalesce_max_ms", coalesceMaxMs)
             if (upstreamSocks5.isNotBlank()) {
                 put("upstream_socks5", upstreamSocks5.trim())
@@ -212,6 +219,7 @@ data class MhrvConfig(
                 put("passthrough_hosts", JSONArray().apply { passthroughHosts.forEach { put(it) } })
             }
             if (tunnelDoh) put("tunnel_doh", true)
+            if (youtubeViaRelay) put("youtube_via_relay", true)
             // Trim/drop-empty/dedupe before serializing — symmetric with the
             // read-side normalization in loadFromJson(), so a user typing
             // " doh.foo " or accidentally adding a duplicate doesn't end up
@@ -321,6 +329,7 @@ object ConfigStore {
         if (cfg.upstreamSocks5.isNotBlank()) obj.put("upstream_socks5", cfg.upstreamSocks5)
         if (cfg.passthroughHosts.isNotEmpty()) obj.put("passthrough_hosts", JSONArray().apply { cfg.passthroughHosts.forEach { put(it) } })
         if (cfg.tunnelDoh != defaults.tunnelDoh) obj.put("tunnel_doh", cfg.tunnelDoh)
+        if (cfg.youtubeViaRelay != defaults.youtubeViaRelay) obj.put("youtube_via_relay", cfg.youtubeViaRelay)
         val cleanBypassDohHosts = cfg.bypassDohHosts
             .map { it.trim() }
             .filter { it.isNotEmpty() }
@@ -417,13 +426,14 @@ object ConfigStore {
             verifySsl = obj.optBoolean("verify_ssl", true),
             logLevel = obj.optString("log_level", "info"),
             parallelRelay = obj.optInt("parallel_relay", 1),
-            coalesceStepMs = obj.optInt("coalesce_step_ms", 40),
+            coalesceStepMs = obj.optInt("coalesce_step_ms", 10),
             coalesceMaxMs = obj.optInt("coalesce_max_ms", 1000),
             upstreamSocks5 = obj.optString("upstream_socks5", ""),
             passthroughHosts = obj.optJSONArray("passthrough_hosts")?.let { arr ->
                 buildList { for (i in 0 until arr.length()) add(arr.optString(i)) }
             }?.filter { it.isNotBlank() }.orEmpty(),
             tunnelDoh = obj.optBoolean("tunnel_doh", false),
+            youtubeViaRelay = obj.optBoolean("youtube_via_relay", false),
             bypassDohHosts = obj.optJSONArray("bypass_doh_hosts")?.let { arr ->
                 buildList { for (i in 0 until arr.length()) add(arr.optString(i)) }
             }?.filter { it.isNotBlank() }.orEmpty(),

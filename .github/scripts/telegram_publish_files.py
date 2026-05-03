@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -26,6 +27,11 @@ import urllib.parse
 import urllib.request
 import json
 from pathlib import Path
+
+# Telegram sendMessage caps at 4096 chars total. Leave headroom for
+# the announcement header / cross-link footer / hashtag — anything
+# above this gets truncated with a "see full notes on GitHub" tail.
+TG_CHANGELOG_BUDGET = 3500
 
 # Telegram Bot API uploads cap at 50 MB. Pick 45 MB for chunks so the
 # multipart envelope + caption + Telegram's own overhead don't push us
@@ -194,6 +200,135 @@ def html_escape(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def load_changelog(repo_root: Path, version: str) -> tuple[str | None, str | None]:
+    """Read `docs/changelog/v{version}.md` and split into (Persian, English).
+
+    The repo convention (see `docs/changelog/v1.1.0.md`) is:
+        <!-- comment line -->
+        Persian content...
+        ---
+        English content...
+
+    Returns (None, None) if the file doesn't exist (lets callers fall back
+    to the bare "release dropped" announcement gracefully). Returns
+    (persian, None) if there's no `---` separator (single-language file).
+    """
+    path = repo_root / "docs" / "changelog" / f"v{version}.md"
+    if not path.is_file():
+        return None, None
+    text = path.read_text(encoding="utf-8")
+    # Strip leading HTML comments (the standard `<!-- see docs/... -->`
+    # header). Their content is for editors, not readers.
+    text = re.sub(r"^\s*<!--.*?-->\s*", "", text, count=1, flags=re.DOTALL)
+    # Split on the literal `---` line that separates Persian from English.
+    # We require it to be on its own line so an inline `---` inside a code
+    # block doesn't accidentally split the body.
+    parts = re.split(r"\n\s*---\s*\n", text, maxsplit=1)
+    persian = parts[0].strip() or None
+    english = parts[1].strip() if len(parts) > 1 else None
+    if english:
+        english = english.strip() or None
+    return persian, english
+
+
+def md_to_tg_html(md: str, max_len: int = TG_CHANGELOG_BUDGET) -> str:
+    """Convert a subset of Markdown to Telegram-flavoured HTML.
+
+    Handles only the patterns that show up in our changelog files:
+      - `**bold**`            → `<b>bold</b>`
+      - `[text](url)`         → `<a href="url">text</a>`
+      - `` `code` ``          → `<code>code</code>`
+      - `<!-- comment -->`    → stripped
+      - everything else       → HTML-escaped, line breaks preserved
+
+    The order of operations matters because the input is going through
+    HTML escape: we first carve out the markdown spans into placeholders
+    that escape() can't touch, then escape the rest, then put the spans
+    back as Telegram HTML. This is the same trick the Python `markdown`
+    package uses for inline tokens — much simpler than a real parser
+    when the input grammar is tiny.
+
+    The result is also truncated at `max_len` chars (Telegram's 4096-char
+    sendMessage limit minus header/footer headroom). Truncation snaps to
+    the previous newline so we never cut a markdown span in half.
+    """
+    # 1. Strip HTML comments, including multi-line.
+    md = re.sub(r"<!--.*?-->", "", md, flags=re.DOTALL).strip()
+
+    # 2. Carve out the markdown spans into placeholder tokens. We pick a
+    #    NUL-delimited form because NUL is illegal in markdown source and
+    #    in Telegram messages — safe placeholder.
+    spans: list[str] = []
+
+    def stash(html: str) -> str:
+        spans.append(html)
+        return f"\x00{len(spans) - 1}\x00"
+
+    # Inline code first — backticks are exclusive of the other patterns.
+    md = re.sub(
+        r"`([^`\n]+)`",
+        lambda m: stash(f"<code>{html_escape(m.group(1))}</code>"),
+        md,
+    )
+    # Markdown links `[text](url)` — link text gets HTML-escaped, URL is
+    # passed through but quotes inside it would break the attribute, so
+    # we escape `"` only there.
+    md = re.sub(
+        r"\[([^\]]+)\]\(([^)]+)\)",
+        lambda m: stash(
+            f'<a href="{m.group(2).replace(chr(34), "&quot;")}">'
+            f"{html_escape(m.group(1))}</a>"
+        ),
+        md,
+    )
+    # Bold `**text**`. Done after links so a `**[text](url)**` pattern
+    # still works (the link is already a placeholder by now).
+    md = re.sub(
+        r"\*\*([^*\n]+)\*\*",
+        lambda m: stash(f"<b>{html_escape(m.group(1))}</b>"),
+        md,
+    )
+
+    # 3. HTML-escape everything that wasn't a span. Placeholders survive
+    #    because they contain only NUL and digits, which the escape pass
+    #    leaves alone.
+    md = html_escape(md)
+
+    # 4. Restore the placeholders. We loop because a placeholder's
+    #    expansion can itself contain placeholders — e.g. a markdown
+    #    link `[`code`](url)` stashes the inline code first, then the
+    #    link captures the code's `\x00N\x00` token as its link text.
+    #    A single pass would leave that inner token un-restored. Bound
+    #    the loop to len(spans)+1 so a malformed input can't run away.
+    for _ in range(len(spans) + 1):
+        new = re.sub(
+            r"\x00(\d+)\x00",
+            lambda m: spans[int(m.group(1))],
+            md,
+        )
+        if new == md:
+            break
+        md = new
+
+    # 5. Truncate to fit Telegram's sendMessage cap. Snap to a newline
+    #    boundary so a code/link span isn't cut in half. The trailing
+    #    "..." line tells the reader to go to GitHub for the full notes.
+    if len(md) > max_len:
+        cut = md.rfind("\n", 0, max_len)
+        if cut < max_len // 2:
+            cut = max_len  # very long single line — chop hard
+        md = md[:cut].rstrip() + "\n…\n<i>(see full notes on GitHub)</i>"
+    return md
+
+
+def repo_root_from_script() -> Path:
+    """Find the repo root from this script's location: `<root>/.github/
+    scripts/telegram_publish_files.py` → `<root>`. Used by `load_changelog`
+    so callers don't have to pass it in (and so the script Just Works
+    when run from `cwd != repo root`)."""
+    return Path(__file__).resolve().parent.parent.parent
+
+
 def sha256_hex(path: Path) -> str:
     """Stream-hash the file in 1 MiB chunks. Avoids loading 40+ MB APKs
     into RAM twice (once for hashing, once for upload)."""
@@ -344,12 +479,19 @@ def post_main_channel_pointer(
     hashtag: str,
     channel_username_link: str = "",
     channel_invite_link: str = "",
+    persian_notes: str | None = None,
 ) -> bool:
     """Post a short cross-link to the main announcement channel pointing
     at the anchor post in the files channel. Replaces the previous
     behaviour of posting the universal APK + full changelog directly
     to the main channel — the main channel becomes a discovery surface
     while the files channel hosts the actual artifacts.
+
+    When `persian_notes` is supplied (the Persian half of the matching
+    `docs/changelog/v{version}.md`), it's rendered between the title
+    and the files-channel link so subscribers see what's actually new
+    without needing to click through. Falls back to the bare pointer
+    if notes aren't available.
 
     Includes channel-join links (public username + invite hash) at the
     bottom so recipients who aren't yet members can subscribe before
@@ -358,12 +500,20 @@ def post_main_channel_pointer(
     parts = [
         f"<b>📦 mhrv-rs v{html_escape(version)} منتشر شد</b>",
         "",
+    ]
+    if persian_notes:
+        # Use a slightly tighter budget here since the cross-link has
+        # extra footer chrome (channel-join links) the files-channel
+        # announcement doesn't.
+        parts.append(md_to_tg_html(persian_notes, max_len=TG_CHANGELOG_BUDGET - 400))
+        parts.append("")
+    parts.extend([
         f"برای دانلود فایل‌ها (Android، Windows، macOS، Linux و ...) "
         f"به کانال فایل‌ها مراجعه کنید:",
         "",
         f"👉 <a href=\"{html_escape(files_channel_post_link)}\">"
         f"v{html_escape(version)} — همه فایل‌ها + SHA-256</a>",
-    ]
+    ])
     # Channel-join links. Two forms handle different states of the
     # files channel: the `t.me/<username>` form works for public
     # channels and is the prettier link; the `t.me/+<hash>` invite
@@ -452,12 +602,28 @@ def main() -> int:
     # main channel doesn't carry files anymore, just a single message
     # saying "new release, click here." Recipients land on this anchor
     # and scroll down to see all the platform-specific files.
-    announce = (
-        f"<b>📦 mhrv-rs {html_escape('v' + args.version)} منتشر شد</b>\n"
-        f"\nفایل‌ها در ادامه به ترتیب پلتفرم ارسال می‌شن.\n"
-        f"هر فایل با SHA-256 (تایید اصالت) همراه هست.\n"
-        f"\n{args.hashtag}"
-    )
+    #
+    # We pull the Persian half of `docs/changelog/v{version}.md` if it
+    # exists and inject it into the announcement, so the channel post
+    # actually tells subscribers what changed instead of just "new
+    # release dropped." Falls back to the old skeleton when the file
+    # isn't there (e.g. an out-of-band re-publish for an old tag whose
+    # changelog file was never landed).
+    persian_notes, _english_notes = load_changelog(repo_root_from_script(), args.version)
+    announce_lines = [
+        f"<b>📦 mhrv-rs {html_escape('v' + args.version)} منتشر شد</b>",
+        "",
+    ]
+    if persian_notes:
+        announce_lines.append(md_to_tg_html(persian_notes))
+        announce_lines.append("")
+    announce_lines.extend([
+        "فایل‌ها در ادامه به ترتیب پلتفرم ارسال می‌شن.",
+        "هر فایل با SHA-256 (تایید اصالت) همراه هست.",
+        "",
+        args.hashtag,
+    ])
+    announce = "\n".join(announce_lines)
     announce_msg_id: int | None = None
     try:
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -523,6 +689,7 @@ def main() -> int:
             args.hashtag,
             channel_username_link=username_link,
             channel_invite_link=invite_link,
+            persian_notes=persian_notes,
         )
         if not ok:
             failures += 1

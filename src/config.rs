@@ -104,7 +104,7 @@ pub struct Config {
     pub parallel_relay: u8,
     /// Adaptive batch coalesce: after each op arrives, wait this many ms
     /// for more ops before firing the batch. Resets on every arrival.
-    /// 0 = use compiled default (40ms).
+    /// 0 = use compiled default (10ms).
     #[serde(default)]
     pub coalesce_step_ms: u16,
     /// Hard cap on total coalesce wait (ms). 0 = use compiled default (1000ms).
@@ -332,6 +332,80 @@ pub struct Config {
     /// no benefit).
     #[serde(default = "default_request_timeout_secs")]
     pub request_timeout_secs: u64,
+
+    /// Optional second-hop exit node, for sites that block traffic
+    /// from Google datacenter IPs (Apps Script's outbound IP space).
+    /// Most visibly: Cloudflare-fronted services that flag the GCP IP
+    /// block as bots — ChatGPT (chatgpt.com), Claude (claude.ai),
+    /// Grok (grok.com / x.com), and a long tail of CF-protected SaaS.
+    ///
+    /// Architecture: chain becomes
+    ///   `client → SNI rewrite → Apps Script (Google IP) → exit node
+    ///    (val.town / Deno Deploy / etc., non-Google IP) → destination`
+    ///
+    /// The destination sees the exit node's outbound IP, not Google's.
+    /// CF anti-bot's "this is a Google datacenter" heuristic doesn't
+    /// fire. mhrv-rs's DPI cover (Iran ISP only sees the SNI-rewritten
+    /// TLS to a Google IP) is unchanged — the second hop happens
+    /// inside Apps Script, invisible from the user's network.
+    ///
+    /// Setup walkthrough at `assets/exit_node/README.md`. Default off.
+    #[serde(default)]
+    pub exit_node: ExitNodeConfig,
+}
+
+/// Configuration for the optional second-hop exit node.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ExitNodeConfig {
+    /// Master switch. Default false. Even with `relay_url` and `psk`
+    /// set, nothing routes through the exit node unless this is true.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// HTTPS URL of the exit-node endpoint. Typically a val.town /
+    /// Deno Deploy / fly.io serverless deployment running the
+    /// `assets/exit_node/valtown.ts` script (or an equivalent). The
+    /// exit node is what makes the outbound `fetch()` call to the
+    /// destination, so its IP is what the destination sees.
+    #[serde(default)]
+    pub relay_url: String,
+
+    /// Pre-shared key — must match the `PSK` constant in the exit-node
+    /// script. Without a matching PSK the exit node refuses the request
+    /// (401). The PSK is what keeps the exit node from being usable as
+    /// an open proxy by anyone who learns its URL. Treat like a
+    /// password: do not commit, rotate if leaked. Generate with
+    /// `openssl rand -hex 32`.
+    #[serde(default)]
+    pub psk: String,
+
+    /// `"selective"` (default): only hosts in `hosts` go through the
+    /// exit node; everything else takes the regular Apps Script path.
+    /// Recommended — the exit-node hop adds ~200-500 ms per request,
+    /// so reserve it for sites that need a non-Google IP.
+    ///
+    /// `"full"`: every request goes through the exit node. Useful only
+    /// when the entire workload is CF-anti-bot affected, or when the
+    /// exit node happens to be faster than Apps Script alone for the
+    /// user's network path (rare but possible on very slow ISPs).
+    #[serde(default = "default_exit_node_mode")]
+    pub mode: String,
+
+    /// In `"selective"` mode, the list of destination hostnames that
+    /// route through the exit node. Matches exactly OR as a
+    /// dot-anchored suffix, mirroring `passthrough_hosts` semantics:
+    /// `"chatgpt.com"` covers `chatgpt.com` and `api.chatgpt.com` and
+    /// `auth.chatgpt.com` etc. Leading dots are stripped at load.
+    ///
+    /// The recurring CF-anti-bot list from community reports:
+    /// `chatgpt.com`, `claude.ai`, `x.com`, `grok.com`. Extend for
+    /// any other CF-blocked sites you need.
+    #[serde(default)]
+    pub hosts: Vec<String>,
+}
+
+fn default_exit_node_mode() -> String {
+    "selective".into()
 }
 
 /// One multi-edge fronting group. Edge CDNs like Vercel and Fastly

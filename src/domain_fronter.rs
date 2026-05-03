@@ -151,6 +151,21 @@ pub struct DomainFronter {
     /// (#430, masterking32 PR #25). Read by `tunnel_client::fire_batch`
     /// so a single config field tunes the timeout used everywhere.
     batch_timeout: Duration,
+    /// Optional second-hop exit node (val.town / Deno Deploy / etc.)
+    /// to bypass CF-anti-bot blocks on sites that flag Google datacenter
+    /// IPs (chatgpt.com, claude.ai, grok.com, x.com). Mirrors
+    /// `Config::exit_node`. When `exit_node_enabled` is false (the more
+    /// common state), all relay traffic takes the regular Apps Script
+    /// path. When true, hosts matching `exit_node_hosts` (or all hosts
+    /// when `exit_node_full`) route through the exit-node URL inside
+    /// the Apps Script call.
+    exit_node_enabled: bool,
+    exit_node_url: String,
+    exit_node_psk: String,
+    exit_node_full: bool,
+    /// Pre-normalized (lowercased, leading-dot stripped) host list for
+    /// fast O(N) match in `exit_node_matches`.
+    exit_node_hosts: Vec<String>,
 }
 
 /// Aggregated stats for one remote host.
@@ -311,7 +326,52 @@ impl DomainFronter {
             batch_timeout: Duration::from_secs(
                 config.request_timeout_secs.clamp(5, 300),
             ),
+            exit_node_enabled: config.exit_node.enabled
+                && !config.exit_node.relay_url.is_empty()
+                && !config.exit_node.psk.is_empty(),
+            exit_node_url: config
+                .exit_node
+                .relay_url
+                .trim_end_matches('/')
+                .to_string(),
+            exit_node_psk: config.exit_node.psk.clone(),
+            exit_node_full: matches!(
+                config.exit_node.mode.to_ascii_lowercase().as_str(),
+                "full"
+            ),
+            exit_node_hosts: config
+                .exit_node
+                .hosts
+                .iter()
+                .map(|h| h.trim().trim_start_matches('.').to_ascii_lowercase())
+                .filter(|h| !h.is_empty())
+                .collect(),
         })
+    }
+
+    /// True when the configured exit node should handle this URL.
+    /// In `selective` mode (default), checks the host against the
+    /// pre-normalized `exit_node_hosts` list (exact match OR
+    /// dot-anchored suffix, mirroring `passthrough_hosts` semantics).
+    /// In `full` mode, every URL routes through the exit node.
+    pub(crate) fn exit_node_matches(&self, url: &str) -> bool {
+        if !self.exit_node_enabled {
+            return false;
+        }
+        if self.exit_node_full {
+            return true;
+        }
+        let host = match extract_host(url) {
+            Some(h) => h,
+            None => return false,
+        };
+        let host_lc = host.to_ascii_lowercase();
+        for entry in &self.exit_node_hosts {
+            if host_lc == *entry || host_lc.ends_with(&format!(".{}", entry)) {
+                return true;
+            }
+        }
+        false
     }
 
     /// Per-batch HTTP round-trip timeout. Read by `tunnel_client` so the
@@ -708,6 +768,40 @@ impl DomainFronter {
         } else {
             url
         };
+
+        // Exit-node short-circuit: route through the configured second-hop
+        // relay (val.town / Deno Deploy / etc.) for hosts that need a
+        // non-Google exit IP. The cache + coalesce layer below is bypassed
+        // for these — exit-node-eligible hosts are the ones with active
+        // anti-bot challenges (CF Turnstile, ChatGPT login, Claude.ai,
+        // grok.com), and serving cached responses across users for those
+        // would be wrong (auth tokens, session state, per-user
+        // personalization). Falls back to the regular Apps Script relay
+        // if the exit node fails (network error, 5xx from val.town, etc.)
+        // so a misconfigured or down exit node doesn't take the user
+        // offline for the sites that DON'T need it.
+        if self.exit_node_matches(url) {
+            let t0 = Instant::now();
+            match self.relay_via_exit_node(method, url, headers, body).await {
+                Ok(bytes) => {
+                    self.record_site(
+                        url,
+                        false,
+                        bytes.len() as u64,
+                        t0.elapsed().as_nanos() as u64,
+                    );
+                    return bytes;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "exit node failed for {}: {} — falling back to direct Apps Script",
+                        url,
+                        e
+                    );
+                    // fall through to the regular relay path below
+                }
+            }
+        }
 
         // Range requests are partial-content responses; caching or
         // coalescing them against a non-range key would be catastrophic
@@ -1183,6 +1277,185 @@ impl DomainFronter {
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// Send a request through the configured exit node, chained inside
+    /// an Apps Script call. Path:
+    ///
+    /// ```text
+    /// client → SNI rewrite → Apps Script (Google IP)
+    ///        → UrlFetchApp.fetch(exit_node_url)
+    ///        → exit node (val.town, non-Google IP)
+    ///        → fetch(real_url)
+    ///        → response back through both layers
+    /// ```
+    ///
+    /// Apps Script sees the outer call (URL = exit_node_url, method =
+    /// POST, body = inner relay JSON authenticated with the exit-node
+    /// PSK). The exit node sees the inner JSON, fetches the real
+    /// destination, returns a `{s, h, b}` JSON envelope. Apps Script
+    /// returns that envelope as the body of its raw HTTP response
+    /// (because we set `r: true`). We then unwrap one extra layer:
+    /// extract Apps Script's body → parse the val.town JSON → reconstruct
+    /// the destination's raw HTTP response so the rest of the proxy
+    /// pipeline (MITM TLS write-back) sees the same shape it gets from
+    /// the regular path.
+    async fn relay_via_exit_node(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<Vec<u8>, FronterError> {
+        let inner_json = self.build_exit_node_inner_payload(method, url, headers, body)?;
+
+        // The outer payload is just a normal Apps Script relay request
+        // pointing at the exit-node URL with POST + the inner JSON as body.
+        // Reusing build_payload_json keeps the outer envelope consistent
+        // with everything else (including the random padding for DPI
+        // evasion). The `r: true` flag in RelayRequest makes Code.gs
+        // return val.town's raw HTTP response, which is what we want to
+        // unwrap below.
+        let exit_url = self.exit_node_url.clone();
+        let outer_headers = vec![(
+            "Content-Type".to_string(),
+            "application/json".to_string(),
+        )];
+        let outer_payload =
+            self.build_payload_json("POST", &exit_url, &outer_headers, &inner_json)?;
+
+        // Send the outer payload through the relay machinery and get back
+        // Apps Script's response body (which is val.town's JSON envelope).
+        let app_body = self
+            .send_prebuilt_payload_through_relay(outer_payload)
+            .await?;
+
+        // val.town's JSON envelope: {s: u16, h: {...}, b: "<base64>"} on
+        // success, {e: "..."} on its own internal error.
+        parse_exit_node_response(&app_body)
+    }
+
+    /// Build the inner-layer payload that the exit node will execute.
+    /// Same wire shape as a normal `RelayRequest` (`{k, m, u, h, b, ct, r}`)
+    /// but `k` is the exit-node PSK rather than the user's Apps Script
+    /// `auth_key`, and we skip the random-padding field — padding only
+    /// helps DPI evasion on the Iran-side leg, which the inner payload
+    /// is invisible to (it's encrypted inside the Apps Script HTTPS
+    /// connection that the ISP can't inspect).
+    fn build_exit_node_inner_payload(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<Vec<u8>, FronterError> {
+        let filtered = filter_forwarded_headers(headers);
+        let hmap = if filtered.is_empty() {
+            None
+        } else {
+            let mut m = serde_json::Map::with_capacity(filtered.len());
+            for (k, v) in &filtered {
+                m.insert(k.clone(), Value::String(v.clone()));
+            }
+            Some(m)
+        };
+        let b_encoded = if body.is_empty() {
+            None
+        } else {
+            Some(B64.encode(body))
+        };
+        let ct = if body.is_empty() {
+            None
+        } else {
+            find_header(headers, "content-type")
+        };
+        let req = RelayRequest {
+            k: &self.exit_node_psk,
+            m: method,
+            u: url,
+            h: hmap,
+            b: b_encoded,
+            ct,
+            r: false, // val.town returns its own JSON envelope, not raw HTTP
+        };
+        Ok(serde_json::to_vec(&req)?)
+    }
+
+    /// Drive the standard script-id rotation + TLS pool send path with
+    /// a payload we already built. Mirrors `do_relay_once_with` but
+    /// returns the **raw response body bytes** (Apps Script's HTTP body)
+    /// instead of running the body through `parse_relay_json` — the
+    /// exit-node path needs to peel off val.town's JSON envelope, which
+    /// has a different shape from Code.gs's raw-HTTP wrapping.
+    async fn send_prebuilt_payload_through_relay(
+        &self,
+        payload: Vec<u8>,
+    ) -> Result<Vec<u8>, FronterError> {
+        let script_id = self.next_script_id();
+        let path = format!("/macros/s/{}/exec", script_id);
+
+        let mut entry = self.acquire().await?;
+        let req_head = format!(
+            "POST {path} HTTP/1.1\r\n\
+             Host: {host}\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {len}\r\n\
+             Accept-Encoding: gzip\r\n\
+             Connection: keep-alive\r\n\
+             \r\n",
+            path = path,
+            host = self.http_host,
+            len = payload.len(),
+        );
+        entry.stream.write_all(req_head.as_bytes()).await?;
+        entry.stream.write_all(&payload).await?;
+        entry.stream.flush().await?;
+
+        let (mut status, mut resp_headers, mut resp_body) =
+            read_http_response(&mut entry.stream).await?;
+
+        // Follow Apps Script's /exec → /macros/.../exec redirect chain
+        // (typical: 1-2 hops to script.googleusercontent.com). Mirrors
+        // the redirect handling in do_relay_once_with.
+        for _ in 0..5 {
+            if !matches!(status, 301 | 302 | 303 | 307 | 308) {
+                break;
+            }
+            let Some(loc) = header_get(&resp_headers, "location") else {
+                break;
+            };
+            let (rpath, rhost) = parse_redirect(&loc);
+            let rhost = rhost.unwrap_or_else(|| self.http_host.to_string());
+            let req = format!(
+                "GET {rpath} HTTP/1.1\r\n\
+                 Host: {rhost}\r\n\
+                 Accept-Encoding: gzip\r\n\
+                 Connection: keep-alive\r\n\
+                 \r\n",
+            );
+            entry.stream.write_all(req.as_bytes()).await?;
+            entry.stream.flush().await?;
+            let (s, h, b) = read_http_response(&mut entry.stream).await?;
+            status = s;
+            resp_headers = h;
+            resp_body = b;
+        }
+
+        // Don't return to pool — the exit-node path is rare enough that
+        // the connection-reuse semantics aren't worth replicating here.
+        drop(entry);
+
+        if status != 200 {
+            let body_txt = String::from_utf8_lossy(&resp_body)
+                .chars()
+                .take(200)
+                .collect::<String>();
+            return Err(FronterError::Relay(format!(
+                "Apps Script HTTP {} (exit-node outer call): {}",
+                status, body_txt
+            )));
+        }
+        Ok(resp_body)
     }
 
     fn build_payload_json(
@@ -1860,6 +2133,117 @@ fn unix_to_ymd_utc(secs: u64) -> (i64, u32, u32) {
     (y, m as u32, d as u32)
 }
 
+/// Parse the val.town exit-node JSON envelope back into a raw HTTP/1.1
+/// response. The envelope shape is:
+///
+/// - On success: `{ "s": <status u16>, "h": { ... }, "b": "<base64>" }`
+/// - On exit-node-side error: `{ "e": "<message>" }` with HTTP 4xx/5xx
+///   from val.town's own status code (decoded from the outer Apps Script
+///   layer, not the inner field).
+///
+/// We synthesize a complete HTTP/1.1 response from these fields so the
+/// MITM TLS write-back path sees the same shape it gets from the regular
+/// Apps Script relay (status line + headers + body).
+fn parse_exit_node_response(body: &[u8]) -> Result<Vec<u8>, FronterError> {
+    let v: Value = serde_json::from_slice(body).map_err(|e| {
+        FronterError::Relay(format!(
+            "exit-node response not valid JSON ({}): {}",
+            e,
+            String::from_utf8_lossy(&body[..body.len().min(200)])
+        ))
+    })?;
+
+    // Surface val.town's internal errors clearly rather than as a 502
+    // from the outer envelope. The `{e: "..."}` shape is what the val.town
+    // script emits on bad PSK, malformed URL, or any caught exception.
+    if let Some(err_msg) = v.get("e").and_then(|x| x.as_str()) {
+        return Err(FronterError::Relay(format!(
+            "exit node refused or errored: {}",
+            err_msg
+        )));
+    }
+
+    let status = v
+        .get("s")
+        .and_then(|x| x.as_u64())
+        .map(|n| n as u16)
+        .unwrap_or(502);
+    let body_b64 = v.get("b").and_then(|x| x.as_str()).unwrap_or("");
+    let body_bytes = if body_b64.is_empty() {
+        Vec::new()
+    } else {
+        B64.decode(body_b64).map_err(|e| {
+            FronterError::Relay(format!("exit-node body base64 decode failed: {}", e))
+        })?
+    };
+
+    // Reconstruct headers. Skip hop-by-hop / would-double-up headers
+    // (Content-Length comes from our own length count below; the outer
+    // Apps Script transport already handled Transfer-Encoding/chunked).
+    const SKIP_RESPONSE_HEADERS: &[&str] = &[
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "keep-alive",
+    ];
+
+    let mut out = Vec::with_capacity(body_bytes.len() + 256);
+    let _ = std::io::Write::write_fmt(
+        &mut out,
+        format_args!("HTTP/1.1 {} {}\r\n", status, status_reason(status)),
+    );
+    if let Some(headers_obj) = v.get("h").and_then(|x| x.as_object()) {
+        for (k, v_val) in headers_obj {
+            let lc = k.to_ascii_lowercase();
+            if SKIP_RESPONSE_HEADERS.contains(&lc.as_str()) {
+                continue;
+            }
+            if let Some(val_str) = v_val.as_str() {
+                let _ = std::io::Write::write_fmt(
+                    &mut out,
+                    format_args!("{}: {}\r\n", k, val_str),
+                );
+            }
+        }
+    }
+    let _ = std::io::Write::write_fmt(
+        &mut out,
+        format_args!("Content-Length: {}\r\n\r\n", body_bytes.len()),
+    );
+    out.extend_from_slice(&body_bytes);
+    Ok(out)
+}
+
+/// Minimal HTTP status reason-phrase table for synthesizing status
+/// lines in `parse_exit_node_response`. Browsers don't actually parse
+/// the reason phrase (only the status code matters), but a recognizable
+/// string makes log lines readable.
+fn status_reason(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        303 => "See Other",
+        304 => "Not Modified",
+        307 => "Temporary Redirect",
+        308 => "Permanent Redirect",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        408 => "Request Timeout",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        _ => "Status",
+    }
+}
+
 fn extract_host(url: &str) -> Option<String> {
     let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
     let authority = after_scheme.split('/').next().unwrap_or("");
@@ -2098,8 +2482,27 @@ where
         while body.len() < cl {
             let need = cl - body.len();
             let want = need.min(tmp.len());
-            let n = timeout(Duration::from_secs(20), stream.read(&mut tmp[..want])).await
-                .map_err(|_| FronterError::Timeout)??;
+            // Handle ungraceful TLS close-without-close_notify (rustls
+            // surfaces this as `io::ErrorKind::UnexpectedEof`). Some
+            // origins — notably val.town's exit-node path through Apps
+            // Script (#585, v1.9.4) and certain Apps Script `Connection:
+            // close` responses — terminate the underlying TCP without
+            // sending the TLS close_notify alert first. Treat that the
+            // same as a clean `n == 0`: if we already have the full body
+            // declared by Content-Length, the response *is* complete.
+            // Only propagate the error if Content-Length couldn't be
+            // satisfied (real truncation, not a polite-protocol violation).
+            let read_res = timeout(
+                Duration::from_secs(20),
+                stream.read(&mut tmp[..want]),
+            )
+            .await
+            .map_err(|_| FronterError::Timeout)?;
+            let n = match read_res {
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => 0,
+                Err(e) => return Err(e.into()),
+            };
             if n == 0 {
                 return Err(FronterError::BadResponse(
                     "connection closed before full response body".into(),
@@ -2108,11 +2511,17 @@ where
             body.extend_from_slice(&tmp[..n]);
         }
     } else {
-        // No framing — read until short timeout.
+        // No framing — read until short timeout, EOF, or ungraceful
+        // TLS close (UnexpectedEof). Each is treated as "we got what
+        // the peer wanted to send"; the response we already have is
+        // returned to the caller. UnexpectedEof here is the most common
+        // case for `Connection: close` responses from servers that
+        // don't bother with TLS close_notify (#585).
         loop {
             match timeout(Duration::from_secs(2), stream.read(&mut tmp)).await {
                 Ok(Ok(0)) => break,
                 Ok(Ok(n)) => body.extend_from_slice(&tmp[..n]),
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                 Ok(Err(e)) => return Err(e.into()),
                 Err(_) => break,
             }
@@ -2158,8 +2567,18 @@ where
             }
         }
         while buf.len() < size + 2 {
-            let n = timeout(Duration::from_secs(20), stream.read(&mut tmp)).await
-                .map_err(|_| FronterError::Timeout)??;
+            // UnexpectedEof tolerance — see read_http_response for
+            // rationale. Treated as `n == 0`; if we haven't accumulated
+            // the full chunk yet, that's still a real truncation and
+            // we return BadResponse below.
+            let read_res = timeout(Duration::from_secs(20), stream.read(&mut tmp))
+                .await
+                .map_err(|_| FronterError::Timeout)?;
+            let n = match read_res {
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => 0,
+                Err(e) => return Err(e.into()),
+            };
             if n == 0 {
                 return Err(FronterError::BadResponse(
                     "connection closed mid-chunked response".into(),
@@ -2235,14 +2654,38 @@ fn parse_relay_json(body: &[u8]) -> Result<Vec<u8>, FronterError> {
     let data: RelayResponse = match serde_json::from_str(text) {
         Ok(v) => v,
         Err(_) => {
-            // Apps Script may prepend HTML fallback; try to extract first {...}
-            let start = text.find('{').ok_or_else(|| {
-                FronterError::BadResponse(format!("no json in: {}", &text[..text.len().min(200)]))
-            })?;
-            let end = text.rfind('}').ok_or_else(|| {
-                FronterError::BadResponse(format!("no json end in: {}", &text[..text.len().min(200)]))
-            })?;
-            serde_json::from_str(&text[start..=end])?
+            // Some deployments (legacy Code.gs that used HtmlService for
+            // _json, or our own doGet hit accidentally via a redirect
+            // chain) wrap the JSON inside the goog.script sandbox iframe
+            // as `goog.script.init("\x7b...userHtml...\x7d", "", undefined)`.
+            // Try that unwrap first — if it succeeds, the inner userHtml
+            // *is* our JSON. Mirrors upstream's Python client extractor.
+            if let Some(unwrapped) = extract_apps_script_user_html(text) {
+                if let Ok(v) = serde_json::from_str(&unwrapped) {
+                    v
+                } else {
+                    return Err(FronterError::BadResponse(format!(
+                        "no json in apps_script user_html: {}",
+                        &unwrapped[..unwrapped.len().min(200)]
+                    )));
+                }
+            } else {
+                // Last resort: extract first { ... last }, in case Apps
+                // Script prepended HTML preamble before the raw JSON.
+                let start = text.find('{').ok_or_else(|| {
+                    FronterError::BadResponse(format!(
+                        "no json in: {}",
+                        &text[..text.len().min(200)]
+                    ))
+                })?;
+                let end = text.rfind('}').ok_or_else(|| {
+                    FronterError::BadResponse(format!(
+                        "no json end in: {}",
+                        &text[..text.len().min(200)]
+                    ))
+                })?;
+                serde_json::from_str(&text[start..=end])?
+            }
         }
     };
 
@@ -2296,6 +2739,98 @@ fn parse_relay_json(body: &[u8]) -> Result<Vec<u8>, FronterError> {
     out.extend_from_slice(format!("Content-Length: {}\r\n\r\n", resp_body.len()).as_bytes());
     out.extend_from_slice(&resp_body);
     Ok(out)
+}
+
+/// Unwrap the `goog.script.init` sandbox iframe that wraps every
+/// HtmlService web-app response. The wrapper text looks roughly like:
+///
+/// ```text
+/// <html>...
+/// goog.script.init("\x7b\x22userHtml\x22:\x22{...}\x22,...\x7d", "", undefined);
+/// ...
+/// ```
+///
+/// where the first parameter is a JSON string (with `\xNN` byte-escapes
+/// for `{`, `"`, etc.) whose `userHtml` field carries our actual JSON
+/// body. We find the marker, decode the byte-escapes, parse the outer
+/// JSON, and return `userHtml`. Returns `None` if any step doesn't
+/// match — the caller falls back to the brace-scan path.
+///
+/// Mirrors `_extract_apps_script_user_html` in upstream Python client.
+fn extract_apps_script_user_html(text: &str) -> Option<String> {
+    let marker = "goog.script.init(\"";
+    let start_idx = text.find(marker)? + marker.len();
+    // The marker is closed by `", "", undefined` (Apps Script always
+    // emits this exact literal — there are two more positional args after
+    // the JSON string, both empty / undefined).
+    let end_marker = "\", \"\", undefined";
+    let end_idx = text[start_idx..].find(end_marker)? + start_idx;
+    let encoded = &text[start_idx..end_idx];
+
+    // Decode `\xNN` and `\u00NN` byte-escapes that Apps Script uses to
+    // protect `{`, `"`, `\`, etc. inside the JS string literal.
+    let decoded = decode_js_string_escapes(encoded)?;
+
+    // Outer JSON — typically `{"userHtml":"<our JSON>", ...}`.
+    let outer: Value = serde_json::from_str(&decoded).ok()?;
+    let user_html = outer.get("userHtml")?.as_str()?;
+    Some(user_html.to_string())
+}
+
+/// Minimal JS string-literal escape decoder for `\xNN`, `\uNNNN`, and
+/// the standard backslash forms (`\\`, `\"`, `\n`, `\r`, `\t`, `\/`).
+/// Used to unwrap the `goog.script.init("...")` parameter — Apps Script
+/// emits ASCII-only `\xNN` for every non-alphanumeric byte, so the
+/// decoder doesn't need to handle full Unicode surrogates.
+fn decode_js_string_escapes(s: &str) -> Option<String> {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c != b'\\' {
+            // Fast path: copy ASCII / valid UTF-8 byte through.
+            out.push(c as char);
+            i += 1;
+            continue;
+        }
+        if i + 1 >= bytes.len() {
+            return None;
+        }
+        let esc = bytes[i + 1];
+        match esc {
+            b'x' => {
+                if i + 3 >= bytes.len() {
+                    return None;
+                }
+                let hex = std::str::from_utf8(&bytes[i + 2..i + 4]).ok()?;
+                let v = u8::from_str_radix(hex, 16).ok()?;
+                out.push(v as char);
+                i += 4;
+            }
+            b'u' => {
+                if i + 5 >= bytes.len() {
+                    return None;
+                }
+                let hex = std::str::from_utf8(&bytes[i + 2..i + 6]).ok()?;
+                let v = u32::from_str_radix(hex, 16).ok()?;
+                let ch = char::from_u32(v)?;
+                out.push(ch);
+                i += 6;
+            }
+            b'\\' => { out.push('\\'); i += 2; }
+            b'"' => { out.push('"'); i += 2; }
+            b'\'' => { out.push('\''); i += 2; }
+            b'/' => { out.push('/'); i += 2; }
+            b'n' => { out.push('\n'); i += 2; }
+            b'r' => { out.push('\r'); i += 2; }
+            b't' => { out.push('\t'); i += 2; }
+            b'b' => { out.push('\x08'); i += 2; }
+            b'f' => { out.push('\x0c'); i += 2; }
+            _ => return None,
+        }
+    }
+    Some(out)
 }
 
 #[derive(Debug, Clone)]
@@ -2515,7 +3050,117 @@ impl ServerCertVerifier for NoVerify {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{duplex, AsyncWriteExt};
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::{duplex, AsyncRead, AsyncWriteExt, ReadBuf};
+
+    // Test fixture for ungraceful TLS close: emit a fixed prefix of bytes
+    // then return io::ErrorKind::UnexpectedEof on the next read. Mirrors
+    // what rustls surfaces when the peer closes TCP without sending a
+    // TLS close_notify alert (#585).
+    struct UnexpectedEofAfter {
+        bytes: Vec<u8>,
+        position: usize,
+    }
+
+    impl AsyncRead for UnexpectedEofAfter {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if self.position >= self.bytes.len() {
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "peer closed connection without sending TLS close_notify",
+                )));
+            }
+            let remaining = &self.bytes[self.position..];
+            let take = remaining.len().min(buf.remaining());
+            buf.put_slice(&remaining[..take]);
+            self.position += take;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn read_http_response_tolerates_unexpected_eof_with_content_length() {
+        // Issue #585 / v1.9.4 exit-node bug. Some peers (val.town in
+        // particular, certain Apps Script `Connection: close` paths) close
+        // the TCP without TLS close_notify. Body should still be returned
+        // when Content-Length is satisfied, even though the read after
+        // the body closes ungracefully.
+        let body = b"{\"ok\":true}";
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let mut full = header.into_bytes();
+        full.extend_from_slice(body);
+        let mut stream = UnexpectedEofAfter {
+            bytes: full,
+            position: 0,
+        };
+
+        let (status, _headers, got_body) =
+            read_http_response(&mut stream).await.expect("must succeed despite UnexpectedEof");
+        assert_eq!(status, 200);
+        assert_eq!(got_body, body);
+    }
+
+    #[tokio::test]
+    async fn read_http_response_tolerates_unexpected_eof_no_framing() {
+        // Same #585 fix, but for the no-framing branch (server didn't
+        // send Content-Length or Transfer-Encoding). Read until peer
+        // closes — UnexpectedEof should terminate the loop with the
+        // body we accumulated so far, not bubble up as an error.
+        let header = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n";
+        let body = b"hello world";
+        let mut full = header.to_vec();
+        full.extend_from_slice(body);
+        let mut stream = UnexpectedEofAfter {
+            bytes: full,
+            position: 0,
+        };
+
+        let (status, _headers, got_body) =
+            read_http_response(&mut stream).await.expect("must succeed despite UnexpectedEof");
+        assert_eq!(status, 200);
+        assert_eq!(got_body, body);
+    }
+
+    #[tokio::test]
+    async fn parse_exit_node_response_unwraps_valtown_envelope() {
+        // The exit-node path through Apps Script returns val.town's JSON
+        // envelope as the response body. parse_exit_node_response must
+        // unwrap it back into a raw HTTP/1.1 response so the MITM TLS
+        // write-back path sees the same shape it gets from the regular
+        // Apps Script relay.
+        let envelope = br#"{"s":200,"h":{"content-type":"application/json","x-cf-cache":"DYNAMIC"},"b":"eyJtZXNzYWdlIjoiaGVsbG8ifQ=="}"#;
+        let raw = parse_exit_node_response(envelope).expect("envelope unwrap should succeed");
+        let raw_str = String::from_utf8_lossy(&raw);
+        assert!(raw_str.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(raw_str.contains("content-type: application/json\r\n"));
+        assert!(raw_str.contains("x-cf-cache: DYNAMIC\r\n"));
+        assert!(raw_str.contains("Content-Length: 19\r\n"));
+        // Body is `{"message":"hello"}` (19 bytes; the base64-decoded
+        // contents of the b field).
+        assert!(raw.ends_with(b"{\"message\":\"hello\"}"));
+    }
+
+    #[tokio::test]
+    async fn parse_exit_node_response_surfaces_explicit_error() {
+        // When val.town returns `{e: "..."}` instead of the {s,h,b} shape,
+        // surface that error message specifically rather than letting
+        // it through as an unparseable 502 — the message string is what
+        // tells the user what went wrong (placeholder PSK, bad URL,
+        // unauthorized, etc.).
+        let envelope = br#"{"e":"unauthorized"}"#;
+        let err = parse_exit_node_response(envelope).expect_err("must surface error");
+        let msg = format!("{}", err);
+        assert!(msg.contains("unauthorized"), "got: {}", msg);
+        assert!(msg.contains("exit node"), "got: {}", msg);
+    }
 
     #[test]
     fn unix_to_ymd_utc_handles_known_epochs() {
@@ -2898,6 +3543,73 @@ hello";
         let s = String::from_utf8_lossy(&raw);
         assert!(s.contains("Set-Cookie: a=1\r\n"));
         assert!(s.contains("Set-Cookie: b=2\r\n"));
+    }
+
+    #[test]
+    fn decode_js_string_escapes_xnn_and_unicode() {
+        // \x7b = '{', \x22 = '"', \x7d = '}', \x5b = '[', \x5d = ']'
+        let inner = r#"\x7b\x22s\x22:200,\x22b\x22:\x22\x22\x7d"#;
+        let out = decode_js_string_escapes(inner).unwrap();
+        assert_eq!(out, r#"{"s":200,"b":""}"#);
+
+        // A = 'A', mixed with literal
+        assert_eq!(decode_js_string_escapes(r"ABC").unwrap(), "ABC");
+
+        // standard escapes
+        assert_eq!(decode_js_string_escapes(r#"a\nb\t\\\"c"#).unwrap(), "a\nb\t\\\"c");
+
+        // truncated escape returns None instead of panicking
+        assert!(decode_js_string_escapes(r"\x7").is_none());
+        assert!(decode_js_string_escapes(r"\u00").is_none());
+    }
+
+    /// Hand-build the `goog.script.init("...", "", undefined)` wrapper for
+    /// a given inner relay JSON, matching the form Apps Script HtmlService
+    /// emits when the deployment uses HtmlService for its response. Every
+    /// `{`/`}` becomes `\x7b`/`\x7d`, every `"` becomes `\"`, every `:`
+    /// stays — that's the realistic subset our unwrapper has to cope with.
+    fn build_goog_script_init_wrapper(inner_relay_json: &str) -> String {
+        // Step 1: build the outer JSON object {"userHtml": "<inner>", ...}
+        // using serde so the inner JSON is properly JSON-escaped (including
+        // each `"` → `\"`).
+        let outer = serde_json::json!({ "userHtml": inner_relay_json });
+        let outer_str = serde_json::to_string(&outer).unwrap();
+        // Step 2: re-escape `{`/`}` → `\xNN` and `"` → `\"` to match the
+        // form Apps Script wraps inside the `goog.script.init("…")`
+        // JS string literal.
+        let mut wire = String::with_capacity(outer_str.len() * 2);
+        for ch in outer_str.chars() {
+            match ch {
+                '{' => wire.push_str(r"\x7b"),
+                '}' => wire.push_str(r"\x7d"),
+                '"' => wire.push_str(r#"\""#),
+                other => wire.push(other),
+            }
+        }
+        format!(
+            "<html><body><script>goog.script.init(\"{}\", \"\", undefined);</script></body></html>",
+            wire
+        )
+    }
+
+    #[test]
+    fn extract_apps_script_user_html_unwraps_goog_init() {
+        let inner_json = r#"{"s":200,"h":{},"b":"aGk="}"#;
+        let wrapped = build_goog_script_init_wrapper(inner_json);
+        let extracted = extract_apps_script_user_html(&wrapped).unwrap();
+        assert_eq!(extracted, inner_json);
+    }
+
+    #[test]
+    fn parse_relay_json_unwraps_goog_script_init() {
+        // End-to-end: an iframe-wrapped body should still parse correctly
+        // through parse_relay_json. Without the unwrap helper this used
+        // to fail with `key must be a string at line 2`.
+        let inner_json = r#"{"s":200,"h":{},"b":""}"#;
+        let wrapped = build_goog_script_init_wrapper(inner_json);
+        let raw = parse_relay_json(wrapped.as_bytes()).unwrap();
+        let s = String::from_utf8_lossy(&raw);
+        assert!(s.starts_with("HTTP/1.1 200 "), "got: {}", s);
     }
 
     #[tokio::test(flavor = "current_thread")]

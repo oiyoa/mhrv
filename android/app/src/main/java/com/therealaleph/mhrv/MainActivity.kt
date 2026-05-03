@@ -147,130 +147,113 @@ class MainActivity : AppCompatActivity() {
             pendingDownloadPath = null
         }
 
-        val snackbarHostState = remember { SnackbarHostState() }
-        var currentScreen by remember { mutableStateOf(Screen.HOME) }
-
-        // MainActivity's onStart is intentionally dumb: it only
-        // launches the VpnService. The auto-resolve that used to
-        // live here ran load-modify-save directly on disk, which
-        // left HomeScreen's in-memory Compose `cfg` stale — a
-        // subsequent UI edit would then persist the stale cfg back
-        // over the fresh IP we just wrote. HomeScreen now owns the
-        // auto-resolve (it uses the same persist() flow the UI uses
-        // for text-field edits, so there's one source of truth).
-
-        val onStart = {
-            // Only ask for the VPN-consent grant when the user has
-            // opted into VPN_TUN mode. In PROXY_ONLY we don't touch
-            // VpnService.prepare — firing the consent dialog there
-            // would be wrong (user said "no VPN") and MhrvVpnService
-            // wouldn't call establish() anyway.
-            val cfg = ConfigStore.load(this)
-            if (cfg.connectionMode == ConnectionMode.VPN_TUN) {
-                val prepareIntent = VpnService.prepare(this)
-                if (prepareIntent == null) {
-                    startVpnService()
-                } else {
-                    vpnPrepareLauncher.launch(prepareIntent)
-                }
-            } else {
-                startVpnService()
-            }
-        }
-
-        val onStop: () -> Unit = {
-            // Stop the foreground service and unbind the TUN interface.
-            // Explicitly calling stopService() ensures the OS kills the
-            // process if it's no longer needed, otherwise START_STICKY
-            // might keep it alive in some states.
-            //
-            // Rationale for the dual-Intent approach:
-            //   1. We send ACTION_STOP so the service can clean up the Rust
-            //      relay gracefully (close sockets, dump final stats).
-            //
-            //   2. We follow with stopService() because sometimes Android 11+
-            //      ignores the graceful stop if the system decided to
-            //      START_STICKY service in a fresh process after the
-            //      user swipes us away from Recents, and the user's
-            //      next Stop tap needs to actually unbind even if our
-            //      in-memory TUN fd reference is gone. stopService is
-            //      idempotent so it's safe to follow the graceful path.
-            //
-            //   3. We do NOT touch the VpnService permission — that's
-            //      the OS-wide VPN grant and the user approved it
-            //      deliberately. Revoking it would force a re-prompt
-            //      on next Start, which is worse UX.
-            val stopAction = Intent(this, MhrvVpnService::class.java)
-                .setAction(MhrvVpnService.ACTION_STOP)
-            startService(stopAction)
-            stopService(Intent(this, MhrvVpnService::class.java))
-        }
-
-        val onInstallCaConfirmed = {
-            // The flow is (1) export cert, (2) copy it to Downloads so
-            // the user can find it in the Files app, (3) deep-link to
-            // Security Settings where they can tap "Install a
-            // certificate". On return we verify via AndroidCAStore.
-            //
-            // We explicitly DO NOT use KeyChain.createInstallIntent —
-            // on Android 11+ that intent just opens a dead-end
-            // "Install in Settings" dialog with no path forward, which
-            // is confusing for users.
-            val fp = CaInstall.fingerprint(this)
-            val downloadPath = CaInstall.saveToDownloads(this)
-            if (fp != null) {
-                pendingFingerprint = fp
-                pendingDownloadPath = downloadPath
-                installCaLauncher.launch(CaInstall.buildSettingsIntent())
-            } else {
-                caOutcome = CaInstallOutcome.Failed(
-                    "Couldn't read the CA cert. Tap Start once so the proxy creates it, then try again.",
-                )
-            }
-        }
-
-        when (currentScreen) {
-            Screen.HOME -> NewHomeScreen(
-                onStart = onStart,
-                onStop = onStop,
-                onInstallCaConfirmed = onInstallCaConfirmed,
-                onNavigateToSettings = { currentScreen = Screen.SETTINGS },
-                caOutcome = caOutcome,
-                onCaOutcomeConsumed = { caOutcome = null },
-                snackbarHostState = snackbarHostState
-            )
-            Screen.SETTINGS -> HomeScreen(
-                onStart = onStart,
-                onStop = onStop,
-                onInstallCaConfirmed = onInstallCaConfirmed,
-                caOutcome = caOutcome,
-                onCaOutcomeConsumed = { caOutcome = null },
-                onLangChange = { lang ->
-                    // Re-apply the new locale to the running process. AppCompatDelegate
-                    // picks it up from MhrvApp.onCreate on process restart, so we
-                    // recreate() the activity to take effect immediately — otherwise
-                    // the user would have to swipe the app away and reopen it for
-                    // RTL/LTR to swap.
-                    val tag = when (lang) {
-                        UiLang.FA -> "fa"
-                        UiLang.EN -> "en"
-                        UiLang.AUTO -> ""
+        HomeScreen(
+            // MainActivity's onStart is intentionally dumb: it only
+            // launches the VpnService. The auto-resolve that used to
+            // live here ran load-modify-save directly on disk, which
+            // left HomeScreen's in-memory Compose `cfg` stale — a
+            // subsequent UI edit would then persist the stale cfg back
+            // over the fresh IP we just wrote. HomeScreen now owns the
+            // auto-resolve (it uses the same persist() flow the UI uses
+            // for text-field edits, so there's one source of truth).
+            onStart = {
+                // Only ask for the VPN-consent grant when the user has
+                // opted into VPN_TUN mode. In PROXY_ONLY we don't touch
+                // VpnService.prepare — firing the consent dialog there
+                // would be wrong (user said "no VPN") and MhrvVpnService
+                // wouldn't call establish() anyway.
+                val cfg = ConfigStore.load(this)
+                if (cfg.connectionMode == ConnectionMode.VPN_TUN) {
+                    val prepareIntent = VpnService.prepare(this)
+                    if (prepareIntent == null) {
+                        startVpnService()
+                    } else {
+                        vpnPrepareLauncher.launch(prepareIntent)
                     }
-                    androidx.appcompat.app.AppCompatDelegate.setApplicationLocales(
-                        if (tag.isEmpty())
-                            androidx.core.os.LocaleListCompat.getEmptyLocaleList()
-                        else
-                            androidx.core.os.LocaleListCompat.forLanguageTags(tag),
+                } else {
+                    startVpnService()
+                }
+            },
+            onStop = {
+                // Single-step graceful teardown. ACTION_STOP delivered via
+                // startService() reaches MhrvVpnService.onStartCommand,
+                // which spawns the `mhrv-teardown` background thread that
+                // tears down tun2proxy + the Rust runtime and then calls
+                // stopSelf() at the end of teardown. Service stops on its
+                // own — we don't need (and must not) follow up with
+                // stopService().
+                //
+                // History (#666 from @ilok67): we used to call stopService()
+                // immediately after startService(stopAction), as belt-and-
+                // suspenders against a "force-closed then reopened zombie"
+                // case. That second call was firing onDestroy() while the
+                // mhrv-teardown thread was still running, racing two threads
+                // through the lifecycle and crashing on tap-to-disconnect.
+                // The teardown thread's idempotency guard (tornDown
+                // AtomicBoolean) protects against double-teardown of native
+                // state, but it can't protect against OS-level lifecycle
+                // races on stopSelf vs stopService. ACTION_STOP alone is
+                // enough for both the live-service and zombie cases —
+                // startService creates a fresh service in the new process
+                // for zombies, runs teardown (no-op on already-clean state)
+                // and stops it.
+                //
+                // We do NOT touch the VpnService permission — that's the
+                // OS-wide VPN grant and the user approved it deliberately.
+                // Revoking it would force a re-prompt on next Start, which
+                // is worse UX.
+                val stopAction = Intent(this, MhrvVpnService::class.java)
+                    .setAction(MhrvVpnService.ACTION_STOP)
+                startService(stopAction)
+            },
+            onInstallCaConfirmed = {
+                // The flow is (1) export cert, (2) copy it to Downloads so
+                // the user can find it in the Files app, (3) deep-link to
+                // Security Settings where they can tap "Install a
+                // certificate". On return we verify via AndroidCAStore.
+                //
+                // We explicitly DO NOT use KeyChain.createInstallIntent —
+                // on Android 11+ that intent just opens a dead-end
+                // "Install in Settings" dialog with no path forward, which
+                // is confusing for users.
+                val fp = CaInstall.fingerprint(this)
+                val downloadPath = CaInstall.saveToDownloads(this)
+                if (fp != null) {
+                    pendingFingerprint = fp
+                    pendingDownloadPath = downloadPath
+                    installCaLauncher.launch(CaInstall.buildSettingsIntent())
+                } else {
+                    caOutcome = CaInstallOutcome.Failed(
+                        "Couldn't read the CA cert. Tap Start once so the proxy creates it, then try again.",
                     )
-                    // AppCompatDelegate triggers recreate internally on API 33+
-                    // via the per-app language OS setting, but on older API
-                    // levels it doesn't — call it explicitly for consistent
-                    // behaviour across the minSdk=24 range.
-                    recreate()
-                },
-                onBack = { currentScreen = Screen.HOME }
-            )
-        }
+                }
+            },
+            caOutcome = caOutcome,
+            onCaOutcomeConsumed = { caOutcome = null },
+            onLangChange = { lang ->
+                // Re-apply the new locale to the running process. AppCompatDelegate
+                // picks it up from MhrvApp.onCreate on process restart, so we
+                // recreate() the activity to take effect immediately — otherwise
+                // the user would have to swipe the app away and reopen it for
+                // RTL/LTR to swap.
+                val tag = when (lang) {
+                    UiLang.FA -> "fa"
+                    UiLang.EN -> "en"
+                    UiLang.AUTO -> ""
+                }
+                androidx.appcompat.app.AppCompatDelegate.setApplicationLocales(
+                    if (tag.isEmpty())
+                        androidx.core.os.LocaleListCompat.getEmptyLocaleList()
+                    else
+                        androidx.core.os.LocaleListCompat.forLanguageTags(tag),
+                )
+                // AppCompatDelegate triggers recreate internally on API 33+
+                // via the per-app language OS setting, but on older API
+                // levels it doesn't — call it explicitly for consistent
+                // behaviour across the minSdk=24 range.
+                recreate()
+            },
+        )
     }
 
     private fun startVpnService() {

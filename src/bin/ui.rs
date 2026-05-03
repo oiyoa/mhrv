@@ -13,6 +13,7 @@ use mhrv_rs::cert_installer::{install_ca, reconcile_sudo_environment, remove_ca}
 use mhrv_rs::config::{Config, FrontingGroup, ScriptId};
 use mhrv_rs::data_dir;
 use mhrv_rs::domain_fronter::{DomainFronter, DEFAULT_GOOGLE_SNI_POOL};
+use mhrv_rs::lan_utils::{detect_lan_ip, is_share_on_lan};
 use mhrv_rs::mitm::{MitmCertManager, CA_CERT_FILE};
 use mhrv_rs::proxy_server::ProxyServer;
 use mhrv_rs::{scan_ips, scan_sni, test_cmd};
@@ -280,6 +281,10 @@ struct FormState {
     auto_blacklist_window_secs: u64,
     auto_blacklist_cooldown_secs: u64,
     request_timeout_secs: u64,
+    /// Optional second-hop exit node for CF-anti-bot bypass (chatgpt.com /
+    /// claude.ai / grok.com / x.com). Config-only — no UI editor yet.
+    /// See `assets/exit_node/` for the val.town deployment script.
+    exit_node: mhrv_rs::config::ExitNodeConfig,
 }
 
 #[derive(Clone, Debug)]
@@ -381,6 +386,7 @@ fn load_form() -> (FormState, Option<String>) {
             auto_blacklist_window_secs: c.auto_blacklist_window_secs,
             auto_blacklist_cooldown_secs: c.auto_blacklist_cooldown_secs,
             request_timeout_secs: c.request_timeout_secs,
+            exit_node: c.exit_node.clone(),
         }
     } else {
         FormState {
@@ -419,6 +425,7 @@ fn load_form() -> (FormState, Option<String>) {
             auto_blacklist_window_secs: 30,
             auto_blacklist_cooldown_secs: 120,
             request_timeout_secs: 30,
+            exit_node: mhrv_rs::config::ExitNodeConfig::default(),
         }
     };
     (form, load_err)
@@ -593,6 +600,10 @@ impl FormState {
             auto_blacklist_window_secs: self.auto_blacklist_window_secs,
             auto_blacklist_cooldown_secs: self.auto_blacklist_cooldown_secs,
             request_timeout_secs: self.request_timeout_secs,
+            // Exit-node config (CF-anti-bot bypass for chatgpt.com / claude.ai
+            // / grok.com / x.com). Round-trip through FormState — config-only
+            // editing for now, UI editor planned for v1.9.x desktop UI batch.
+            exit_node: self.exit_node.clone(),
         })
     }
 }
@@ -664,12 +675,26 @@ struct ConfigWire<'a> {
     auto_blacklist_cooldown_secs: u64,
     #[serde(skip_serializing_if = "is_default_timeout_secs")]
     request_timeout_secs: u64,
+    /// Exit-node config (CF-anti-bot bypass for chatgpt.com / claude.ai /
+    /// grok.com / x.com via val.town second-hop relay). Skip when fully
+    /// default (disabled with no URL/PSK/hosts) so configs without
+    /// exit-node setup stay clean. Round-tripped through FormState so
+    /// Save preserves user-edited values.
+    #[serde(skip_serializing_if = "is_default_exit_node")]
+    exit_node: &'a mhrv_rs::config::ExitNodeConfig,
 }
 
 fn is_default_strikes(v: &u32) -> bool { *v == 3 }
 fn is_default_window_secs(v: &u64) -> bool { *v == 30 }
 fn is_default_cooldown_secs(v: &u64) -> bool { *v == 120 }
 fn is_default_timeout_secs(v: &u64) -> bool { *v == 30 }
+fn is_default_exit_node(en: &&mhrv_rs::config::ExitNodeConfig) -> bool {
+    !en.enabled
+        && en.relay_url.is_empty()
+        && en.psk.is_empty()
+        && en.hosts.is_empty()
+        && (en.mode.is_empty() || en.mode == "selective")
+}
 
 fn is_false(b: &bool) -> bool {
     !*b
@@ -724,6 +749,7 @@ impl<'a> From<&'a Config> for ConfigWire<'a> {
             auto_blacklist_window_secs: c.auto_blacklist_window_secs,
             auto_blacklist_cooldown_secs: c.auto_blacklist_cooldown_secs,
             request_timeout_secs: c.request_timeout_secs,
+            exit_node: &c.exit_node,
         }
     }
 }
@@ -1005,10 +1031,98 @@ impl eframe::App for App {
                         .desired_width(f32::INFINITY));
                 });
 
-                form_row(ui, "Listen host", None, |ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.form.listen_host)
-                        .desired_width(f32::INFINITY));
+                // Network sharing: phones, tablets, other laptops on the
+                // same Wi-Fi can use this proxy when the bind address is
+                // 0.0.0.0 instead of 127.0.0.1. We expose this as a
+                // single-checkbox UI rather than the raw `listen_host`
+                // text field — typing `0.0.0.0` from memory is enough of
+                // a friction point that almost no one does it. Power
+                // users with a custom bind IP (specific NIC) can still
+                // edit `listen_host` directly in `config.json`; we
+                // detect that case and show a "Custom bind" badge so
+                // the checkbox doesn't silently overwrite their setting
+                // on the next Save.
+                //
+                // Snapshot the relevant flags before entering form_row's
+                // closure — we need to mutate `self.form.listen_host`
+                // inside the closure when the checkbox toggles, so we
+                // can't hold a borrow on it through the closure.
+                let listen_host_snapshot = self.form.listen_host.trim().to_string();
+                let listen_port_snapshot = self.form.listen_port.trim().to_string();
+                let socks5_port_snapshot = self.form.socks5_port.trim().to_string();
+                let was_share_on_lan = is_share_on_lan(&listen_host_snapshot);
+                let lower_snapshot = listen_host_snapshot.to_ascii_lowercase();
+                let is_custom_bind = !listen_host_snapshot.is_empty()
+                    && !was_share_on_lan
+                    && lower_snapshot != "127.0.0.1"
+                    && lower_snapshot != "localhost";
+                let mut new_listen_host: Option<String> = None;
+                form_row(ui, "Network", Some(
+                    "By default the proxy is reachable only from this computer. \
+                     Turn this on to let phones, tablets, and other laptops on the \
+                     same Wi-Fi (or a hotspot you're sharing) use it too. The \
+                     other devices then point their HTTP / SOCKS5 proxy at the \
+                     LAN IP shown below. Make sure your firewall lets in the proxy \
+                     port — macOS pops up a Firewall prompt the first time."
+                ), |ui| {
+                    if is_custom_bind {
+                        // The user manually wrote a specific bind IP —
+                        // don't let the checkbox stomp on it. Show what
+                        // they have and tell them to edit config.json
+                        // if they want to change it.
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new(format!(
+                                "Custom bind: {}",
+                                listen_host_snapshot
+                            )).color(egui::Color32::from_rgb(220, 180, 100)));
+                            ui.small("Edit `listen_host` in config.json to change.");
+                        });
+                    } else {
+                        let mut share = was_share_on_lan;
+                        if ui.checkbox(&mut share, "Share with other devices on my Wi-Fi / network").changed() {
+                            new_listen_host = Some(if share {
+                                "0.0.0.0".to_string()
+                            } else {
+                                "127.0.0.1".to_string()
+                            });
+                        }
+                        if share {
+                            // detect_lan_ip() opens a UDP socket and
+                            // asks the kernel which interface a packet
+                            // to a public IP would use. Cheap (no
+                            // syscall does network I/O) and accurate
+                            // (it's the same selection any outbound
+                            // connection would make).
+                            match detect_lan_ip() {
+                                Some(ip) => {
+                                    let port = if listen_port_snapshot.is_empty() {
+                                        "8085"
+                                    } else {
+                                        listen_port_snapshot.as_str()
+                                    };
+                                    let socks_port = if socks5_port_snapshot.is_empty() {
+                                        "8086"
+                                    } else {
+                                        socks5_port_snapshot.as_str()
+                                    };
+                                    ui.small(egui::RichText::new(format!(
+                                        "Other devices: HTTP {}:{}  ·  SOCKS5 {}:{}",
+                                        ip, port, ip, socks_port,
+                                    )).color(egui::Color32::from_rgb(120, 200, 140)));
+                                }
+                                None => {
+                                    ui.small(egui::RichText::new(
+                                        "Couldn't detect your LAN IP. Find it in System Settings \
+                                         → Network → Wi-Fi → Details (macOS) or `ipconfig` (Windows)."
+                                    ).color(egui::Color32::from_rgb(220, 180, 100)));
+                                }
+                            }
+                        }
+                    }
                 });
+                if let Some(updated) = new_listen_host {
+                    self.form.listen_host = updated;
+                }
 
                 ui.horizontal(|ui| {
                     ui.add_sized(
@@ -2057,6 +2171,41 @@ fn background_thread(shared: Arc<Shared>, rx: Receiver<Cmd>) {
 
             Ok(Cmd::Test(cfg)) => {
                 let shared2 = shared.clone();
+                // Short-circuit modes where `test_cmd::run` deliberately
+                // refuses (full mode, direct mode). Those return false
+                // even when the proxy is healthy, which surfaced as
+                // "Test failed" + alarming red status — see #665. Show
+                // a friendly notice instead and skip the test path.
+                let mode_kind = cfg.mode_kind().ok();
+                let mode_explainer = match mode_kind {
+                    Some(mhrv_rs::config::Mode::Full) => Some(
+                        "Test Relay is wired only for apps_script mode. \
+                         In full mode the data plane is the tunnel-node — \
+                         to verify it end-to-end, start the proxy and load \
+                         https://whatismyipaddress.com in your browser \
+                         via 127.0.0.1:8085. The IP shown should be your \
+                         tunnel-node's VPS IP. Tracking a real Full-mode \
+                         test in #160."
+                    ),
+                    Some(mhrv_rs::config::Mode::Direct) => Some(
+                        "Test Relay is wired only for apps_script mode. \
+                         In direct mode there is no Apps Script relay — \
+                         every request goes through the SNI-rewrite tunnel \
+                         straight to Google's edge. Verify by loading \
+                         https://www.google.com via the proxy."
+                    ),
+                    _ => None,
+                };
+                if let Some(msg) = mode_explainer {
+                    {
+                        let mut st = shared.state.lock().unwrap();
+                        st.last_test_ok = None;
+                        st.last_test_msg = msg.into();
+                        st.last_test_msg_at = Some(Instant::now());
+                    }
+                    push_log(&shared, &format!("[ui] test skipped: {}", msg));
+                    continue;
+                }
                 push_log(&shared, "[ui] running test...");
                 rt.spawn(async move {
                     let ok = test_cmd::run(&cfg).await;
