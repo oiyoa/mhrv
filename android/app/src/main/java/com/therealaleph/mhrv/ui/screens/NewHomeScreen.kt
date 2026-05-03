@@ -83,7 +83,9 @@ fun NewHomeScreen(
     }
 
     val sheetState = rememberModalBottomSheetState()
+    val certGuideSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var showUnlockSheet by remember { mutableStateOf(false) }
+    var showCertGuide by remember { mutableStateOf(false) }
 
     // Sync config when returning from settings or other changes
     LaunchedEffect(Unit) {
@@ -255,11 +257,40 @@ fun NewHomeScreen(
                 ) {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         LiveStatsCard(statsJson = statsJson)
+
                         ProxyShareCard(
                             httpPort = cfg.listenPort,
                             socks5Port = cfg.socks5Port ?: (cfg.listenPort + 1)
                         )
+
+                        if (cfg.connectionMode == ConnectionMode.VPN_TUN) {
+                            AppSplitButton(
+                                cfg = cfg,
+                                enabled = !isRunning,
+                                onCfgChanged = {
+                                    cfg = it
+                                    ConfigStore.save(ctx, it)
+                                },
+                            )
+                        }
                     }
+                }
+
+                // App Splitting button — visible when VPN is NOT running so
+                // the user can set up splitting before connecting.
+                AnimatedVisibility(
+                    visible = !isRunning && cfg.connectionMode == ConnectionMode.VPN_TUN,
+                    enter = expandVertically(animationSpec = tween(300)) + fadeIn(animationSpec = tween(300)),
+                    exit = shrinkVertically(animationSpec = tween(300)) + fadeOut(animationSpec = tween(300))
+                ) {
+                    AppSplitButton(
+                        cfg = cfg,
+                        enabled = true,
+                        onCfgChanged = {
+                            cfg = it
+                            ConfigStore.save(ctx, it)
+                        },
+                    )
                 }
 
                 AnimatedVisibility(
@@ -267,7 +298,7 @@ fun NewHomeScreen(
                     enter = expandVertically(animationSpec = tween(300)) + fadeIn(animationSpec = tween(300)),
                     exit = shrinkVertically(animationSpec = tween(300)) + fadeOut(animationSpec = tween(300))
                 ) {
-                    CertActionCard(onInstallClick = onInstallCaConfirmed)
+                    CertActionCard(onInstallClick = { showCertGuide = true })
                 }
 
                 GoogleIpCard(
@@ -297,6 +328,19 @@ fun NewHomeScreen(
                             SecretsManager.skipUpdate(ctx)
                             showUnlockSheet = false
                         }
+                    )
+                }
+            }
+
+            if (showCertGuide) {
+                ModalBottomSheet(
+                    onDismissRequest = { showCertGuide = false },
+                    sheetState = certGuideSheetState,
+                    dragHandle = { BottomSheetDefaults.DragHandle() },
+                ) {
+                    CertInstallGuide(
+                        onOpenSettings = onInstallCaConfirmed,
+                        onDismiss = { showCertGuide = false }
                     )
                 }
             }

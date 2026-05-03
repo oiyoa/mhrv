@@ -1,12 +1,8 @@
 package com.therealaleph.mhrv.ui.components
 
-import androidx.compose.animation.*
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Laptop
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -16,15 +12,23 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.therealaleph.mhrv.R
-import com.therealaleph.mhrv.VpnState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.net.Inet4Address
 import java.net.NetworkInterface
 
+import androidx.compose.animation.*
+import androidx.compose.foundation.clickable
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+
+/**
+ * Collapsible card with proxy sharing details.
+ */
 @Composable
 fun ProxyShareCard(
     httpPort: Int,
@@ -34,8 +38,6 @@ fun ProxyShareCard(
     var localIp by remember { mutableStateOf<String?>(null) }
     val clipboardManager = LocalClipboardManager.current
 
-    // Removed manual rotation spec
-
     LaunchedEffect(Unit) {
         while (true) {
             localIp = getLocalIpAddress()
@@ -44,8 +46,7 @@ fun ProxyShareCard(
     }
 
     Card(
-        modifier = Modifier
-            .fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
         ),

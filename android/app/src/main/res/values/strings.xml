@@ -30,6 +30,7 @@
     <string name="btn_copy">Copy</string>
     <string name="btn_install">Install</string>
     <string name="btn_cancel">Cancel</string>
+    <string name="btn_continue">Continue</string>
 
     <!-- Field labels -->
     <string name="field_deployment_urls">Deployment URL(s) or script ID(s)</string>
@@ -141,6 +142,8 @@
     <string name="status_google_unreachable">Google is unreachable</string>
     <string name="sni_status">SNI Status</string>
     <string name="status_attempt_prefix">Attempt %1$d of %2$d</string>
+    <string name="google_reachability_event_ip_updated">Google IP updated to %1$s</string>
+    <string name="google_reachability_latency">%1$d ms</string>
 
     <!-- Unlock Screen -->
     <string name="unlock_title">App Locked</string>
@@ -169,4 +172,55 @@
     <string name="share_proxy_copied">Copied</string>
     <string name="sec_usage_stats">Usage Stats</string>
     <string name="label_requests_sent">%1$d requests sent</string>
+
+    <!-- App Split -->
+    <string name="app_split_title">App Splitting</string>
+    <string name="app_split_status_all">All apps through VPN</string>
+    <string name="app_split_status_n">%1$d app(s) through VPN</string>
+    <string name="app_split_pick_title">Select Apps</string>
+    <string name="app_split_subtitle">Choose which apps use the VPN. If none are selected, all apps go through VPN.</string>
+    <string name="app_split_done">Done</string>
+    <string name="app_split_selected">Selected (%1$d)</string>
+    <string name="app_split_search">Search apps…</string>
+    <string name="app_split_all_hint">All apps — no filtering</string>
+    <!-- Certificate Install Guide -->
+    <string name="cert_guide_title">Install Certificate</string>
+    <string name="cert_guide_step1_title">Save Certificate</string>
+    <string name="cert_guide_step1_done">Saved to Downloads/mhrv-ca.crt</string>
+    <string name="cert_guide_step1_error">Start the VPN once first so the certificate is generated, then try again.</string>
+    <string name="cert_guide_step2_title">Open Settings</string>
+    <string name="cert_guide_step2_search">Use the search bar and type \"CA certificate\"</string>
+    <string name="cert_guide_step2_correct">CA certificate</string>
+    <string name="cert_guide_step2_wrong1">VPN \u0026 app user certificate</string>
+    <string name="cert_guide_step2_wrong2">Wi-Fi certificate</string>
+    <string name="cert_guide_step2_btn">Open Settings</string>
+    <!-- Device-specific breadcrumb paths -->
+    <string name="cert_guide_path_stock_10">Settings → Security → Encryption \u0026 credentials → Install from storage → CA certificate</string>
+    <string name="cert_guide_path_stock_11">Settings → Security → Encryption \u0026 credentials → Install a certificate → CA certificate</string>
+    <string name="cert_guide_path_stock_13">Settings → Security \u0026 privacy → More security settings → Encryption \u0026 credentials → Install a certificate → CA certificate</string>
+    <string name="cert_guide_path_samsung_12">Settings → Biometrics and security → Other security settings → Install from device storage → CA certificate</string>
+    <string name="cert_guide_path_samsung_13">Settings → Security and privacy → More security settings → Encryption and credentials → Install a certificate → CA certificate</string>
+    <string name="cert_guide_step2_direct_title">Install Certificate</string>
+    <string name="cert_guide_step2_direct_desc">Tap Install below. A dialog will appear — select \"VPN and apps\" and tap OK.</string>
+    <string name="cert_guide_step2_direct_btn">Install</string>
+    <string name="cert_guide_step3_title">Select the Certificate</string>
+    <string name="cert_guide_step3_desc">Select mhrv-ca.crt from the Downloads folder.</string>
+    <string name="cert_guide_step3_warning">Tap \"Install anyway\" when you see the security warning.</string>
+    <string name="cert_guide_step3_lock">If Android asks you to set a screen lock (PIN or pattern), that\'s normal — it\'s required for installing certificates.</string>
+    <string name="cert_guide_step4_title">Verify</string>
+    <string name="cert_guide_step4_success">Certificate installed successfully!</string>
+    <string name="cert_guide_step4_waiting">Checking for certificate…</string>
+    <string name="cert_guide_step4_retry">Not detected yet. Complete the steps above, then tap Check.</string>
+    <string name="cert_guide_btn_check">Check</string>
+    <string name="cert_guide_btn_done">Done</string>
+    <string name="cert_guide_save_error">Failed to save to Downloads</string>
+    <string name="cert_guide_success_body">You\'re all set! Relay Mode is now ready.</string>
+    <string name="cert_guide_step1_desc">First, save the certificate to your Downloads folder so you can pick it in Settings.</string>
+    <string name="cert_guide_btn_save">Save Certificate</string>
+    <string name="label_downloads">Downloads</string>
+    <string name="cert_status_checking">Checking certificate status…</string>
+    <string name="cert_status_installed">Certificate Installed</string>
+    <string name="cert_status_required">Certificate Required</string>
+    <string name="cert_status_active">MITM decryption is active</string>
+    <string name="cert_status_enable">Install to enable MITM mode</string>
 </resources>

@@ -44,9 +44,20 @@ fun GoogleIpCard(
     val snisToTest = GoogleReachabilityState.snisToTest
     var expanded by remember { mutableStateOf(false) }
 
+    // Observe logic events for UI side-effects (Toasts)
+    LaunchedEffect(Unit) {
+        GoogleReachabilityState.events.collect { event ->
+            when (event) {
+                is GoogleReachabilityEvent.IpUpdated -> {
+                    Toast.makeText(ctx, ctx.getString(R.string.google_reachability_event_ip_updated, event.newIp), Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
     // Auto-run on open (respects hasAutoRun internally)
     LaunchedEffect(Unit) {
-        GoogleReachabilityState.checkAll(ctx, cfg, scope, force = false, onUpdate = onUpdate)
+        GoogleReachabilityState.checkAll(cfg, scope, force = false, onUpdate = onUpdate)
     }
 
     val hasResult = result is GoogleCheckResult.Connected || result is GoogleCheckResult.NotConnected
@@ -131,7 +142,7 @@ fun GoogleIpCard(
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(
-                        onClick = { GoogleReachabilityState.checkAll(ctx, cfg, scope, force = true, onUpdate = onUpdate) },
+                        onClick = { GoogleReachabilityState.checkAll(cfg, scope, force = true, onUpdate = onUpdate) },
                         enabled = !isLoading,
                         modifier = Modifier.size(32.dp)
                     ) {
@@ -210,7 +221,7 @@ fun GoogleIpCard(
                             if (res is GoogleCheckResult.Connected && res.latencyMs > 0) {
                                 Spacer(Modifier.weight(1f))
                                 Text(
-                                    text = "${res.latencyMs}ms",
+                                    text = stringResource(R.string.google_reachability_latency, res.latencyMs),
                                     style = MaterialTheme.typography.labelSmall,
                                     color = color
                                 )

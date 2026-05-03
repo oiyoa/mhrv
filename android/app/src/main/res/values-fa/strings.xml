@@ -28,6 +28,7 @@
     <string name="btn_copy">کپی</string>
     <string name="btn_install">نصب</string>
     <string name="btn_cancel">انصراف</string>
+    <string name="btn_continue">ادامه</string>
 
     <!-- Field labels -->
     <string name="field_deployment_urls">آدرس‌(های) Deployment یا Script ID</string>
@@ -125,6 +126,8 @@
     <string name="title_settings">تنظیمات</string>
     <string name="sni_status">وضعیت SNI</string>
     <string name="status_attempt_prefix">تلاش %1$d از %2$d</string>
+    <string name="google_reachability_event_ip_updated">IP گوگل به %1$s به‌روزرسانی شد</string>
+    <string name="google_reachability_latency">%1$d میلی‌ثانیه</string>
 
     <!-- Unlock Screen -->
     <string name="unlock_title">برنامه قفل است</string>
@@ -153,4 +156,55 @@
     <string name="share_proxy_copied">کپی شد</string>
     <string name="sec_usage_stats">آمار مصرف</string>
     <string name="label_requests_sent">%1$d درخواست ارسال شده</string>
+
+    <!-- App Split -->
+    <string name="app_split_title">انتخاب برنامه‌ها</string>
+    <string name="app_split_status_all">تمام برنامه‌ها از طریق VPN</string>
+    <string name="app_split_status_n">%1$d برنامه از طریق VPN</string>
+    <string name="app_split_pick_title">انتخاب برنامه‌ها</string>
+    <string name="app_split_subtitle">برنامه‌هایی که باید از VPN استفاده کنند را انتخاب کنید. اگر برنامه‌ای انتخاب نشود، همه برنامه‌ها از VPN عبور می‌کنند.</string>
+    <string name="app_split_done">تأیید</string>
+    <string name="app_split_selected">انتخاب شده (%1$d)</string>
+    <string name="app_split_search">جستجوی برنامه‌ها…</string>
+    <string name="app_split_all_hint">همه برنامه‌ها - بدون فیلتر</string>
+    <!-- Certificate Install Guide -->
+    <string name="cert_guide_title">نصب گواهی</string>
+    <string name="cert_guide_step1_title">ذخیرهٔ گواهی</string>
+    <string name="cert_guide_step1_done">در Downloads/mhrv-ca.crt ذخیره شد</string>
+    <string name="cert_guide_step1_error">ابتدا یک بار VPN را متصل کنید تا گواهی ساخته شود، سپس دوباره تلاش کنید.</string>
+    <string name="cert_guide_step2_title">باز کردن تنظیمات</string>
+    <string name="cert_guide_step2_search">از نوار جست‌وجوی تنظیمات استفاده کرده و «گواهی CA» یا «CA certificate» را جست‌وجو کنید</string>
+    <string name="cert_guide_step2_correct">گواهی CA / CA certificate</string>
+    <string name="cert_guide_step2_wrong1">VPN \u0026 app user certificate</string>
+    <string name="cert_guide_step2_wrong2">Wi-Fi certificate</string>
+    <string name="cert_guide_step2_btn">باز کردن تنظیمات</string>
+    <!-- Device-specific breadcrumb paths -->
+    <string name="cert_guide_path_stock_10">تنظیمات ← امنیت (Security) ← رمزگذاری و اطلاعات کاربری (Encryption \u0026 credentials) ← نصب از حافظه (Install from storage) ← گواهی CA</string>
+    <string name="cert_guide_path_stock_11">تنظیمات ← امنیت (Security) ← رمزگذاری و اطلاعات کاربری (Encryption \u0026 credentials) ← نصب گواهی ← گواهی CA</string>
+    <string name="cert_guide_path_stock_13">تنظیمات ← امنیت و حریم خصوصی (Security \u0026 privacy) ← سایر تنظیمات امنیتی ← رمزگذاری و اطلاعات کاربری ← نصب گواهی ← گواهی CA</string>
+    <string name="cert_guide_path_samsung_12">تنظیمات ← بیومتریک و امنیت ← سایر تنظیمات امنیت ← نصب از حافظه دستگاه ← گواهی CA</string>
+    <string name="cert_guide_path_samsung_13">تنظیمات ← امنیت و حریم خصوصی ← سایر تنظیمات امنیتی ← رمزگذاری و اطلاعات کاربری ← نصب گواهی ← گواهی CA</string>
+    <string name="cert_guide_step2_direct_title">نصب گواهی</string>
+    <string name="cert_guide_step2_direct_desc">روی نصب در پایین بزنید. پیامی ظاهر می‌شود — گزینهٔ «VPN and apps» را انتخاب کرده و تأیید کنید.</string>
+    <string name="cert_guide_step2_direct_btn">نصب</string>
+    <string name="cert_guide_step3_title">انتخاب فایل گواهی</string>
+    <string name="cert_guide_step3_desc">فایل mhrv-ca.crt را از پوشهٔ Downloads انتخاب کنید.</string>
+    <string name="cert_guide_step3_warning">هنگام مشاهدهٔ هشدار امنیتی، روی «Install anyway» بزنید.</string>
+    <string name="cert_guide_step3_lock">اگر اندروید از شما خواست قفل صفحه (پین یا الگو) تنظیم کنید، طبیعی است — برای نصب گواهی الزامی است.</string>
+    <string name="cert_guide_step4_title">تأیید نهایی</string>
+    <string name="cert_guide_step4_success">گواهی با موفقیت نصب شد!</string>
+    <string name="cert_guide_step4_waiting">در حال بررسی نصب گواهی…</string>
+    <string name="cert_guide_step4_retry">هنوز شناسایی نشده است. مراحل بالا را کامل کرده و روی بررسی بزنید.</string>
+    <string name="cert_guide_btn_check">بررسی</string>
+    <string name="cert_guide_btn_done">تأیید</string>
+    <string name="cert_guide_save_error">خطا در ذخیره در پوشه Downloads</string>
+    <string name="cert_guide_success_body">همه چیز آماده است! حالت رله فعال شد.</string>
+    <string name="cert_guide_step1_desc">ابتدا گواهی را در پوشه Downloads ذخیره کنید تا بتوانید آن را در تنظیمات انتخاب کنید.</string>
+    <string name="cert_guide_btn_save">ذخیره گواهی</string>
+    <string name="label_downloads">Downloads</string>
+    <string name="cert_status_checking">در حال بررسی وضعیت گواهی…</string>
+    <string name="cert_status_installed">گواهی نصب شده است</string>
+    <string name="cert_status_required">نیاز به نصب گواهی</string>
+    <string name="cert_status_active">رمزگشایی MITM فعال است</string>
+    <string name="cert_status_enable">برای فعال‌سازی حالت MITM نصب کنید</string>
 </resources>
