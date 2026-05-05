@@ -246,6 +246,9 @@ pub struct RewriteCtx {
     /// `matches_doh_host` for matching, and config.rs `tunnel_doh` for
     /// the trade-off.
     pub bypass_doh: bool,
+    /// When true, immediately reject connections to known DoH hosts.
+    /// Takes priority over bypass_doh.
+    pub block_doh: bool,
     /// User-supplied DoH hostnames added to the built-in default list.
     /// Same matching semantics as `passthrough_hosts`.
     pub bypass_doh_hosts: Vec<String>,
@@ -504,6 +507,7 @@ impl ProxyServer {
             passthrough_hosts: config.passthrough_hosts.clone(),
             block_quic: config.block_quic,
             bypass_doh: !config.tunnel_doh,
+            block_doh: config.block_doh,
             bypass_doh_hosts: config.bypass_doh_hosts.clone(),
             fronting_groups,
         });
@@ -584,6 +588,16 @@ impl ProxyServer {
         let keepalive_task = if let Some(keepalive_fronter) = self.fronter.clone() {
             tokio::spawn(async move {
                 keepalive_fronter.run_h1_keepalive().await;
+            })
+        } else {
+            tokio::spawn(async move { std::future::pending::<()>().await })
+        };
+
+        // Background pool refill: keeps at least POOL_MIN ready TLS
+        // connections so acquire() never pays a cold handshake.
+        let refill_task = if let Some(refill_fronter) = self.fronter.clone() {
+            tokio::spawn(async move {
+                refill_fronter.run_pool_refill().await;
             })
         } else {
             tokio::spawn(async move { std::future::pending::<()>().await })
@@ -697,6 +711,7 @@ impl ProxyServer {
                 tracing::info!("Shutdown signal received, stopping listeners");
                 stats_task.abort();
                 keepalive_task.abort();
+                refill_task.abort();
                 http_task.abort();
                 socks_task.abort();
             }
@@ -1578,6 +1593,18 @@ async fn dispatch_tunnel(
             via.unwrap_or("direct")
         );
         plain_tcp_passthrough(sock, &host, port, via).await;
+        return Ok(());
+    }
+
+    // 0.4. DoH block. Reject connections to known DoH endpoints so browsers
+    //      fall back to system DNS (tun2proxy virtual DNS — instant).
+    //      Takes priority over bypass_doh.
+    if rewrite_ctx.block_doh
+        && port == 443
+        && matches_doh_host(&host, &rewrite_ctx.bypass_doh_hosts)
+    {
+        tracing::info!("dispatch {}:{} -> blocked (block_doh)", host, port);
+        drop(sock);
         return Ok(());
     }
 

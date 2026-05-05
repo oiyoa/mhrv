@@ -57,7 +57,9 @@ pub enum FronterError {
 }
 
 type PooledStream = TlsStream<TcpStream>;
-const POOL_TTL_SECS: u64 = 45;
+const POOL_TTL_SECS: u64 = 60;
+const POOL_MIN: usize = 8;
+const POOL_REFILL_INTERVAL_SECS: u64 = 5;
 const POOL_MAX: usize = 80;
 const REQUEST_TIMEOUT_SECS: u64 = 25;
 const RANGE_PARALLEL_CHUNK_BYTES: u64 = 256 * 1024;
@@ -644,38 +646,86 @@ impl DomainFronter {
         Ok(tls)
     }
 
-    /// Open `n` outbound TLS connections in parallel and park them in the
-    /// pool so the first few user requests don't pay the handshake cost.
-    /// Errors are logged but not returned — best-effort.
+    /// Open `n` outbound TLS connections sequentially (500 ms apart) and
+    /// park them in the pool. Staggered so we don't burst N TLS handshakes
+    /// at Google edge simultaneously, and each connection gets an 8 s
+    /// expiry offset so they roll off gradually instead of all hitting
+    /// POOL_TTL_SECS at once.
     pub async fn warm(self: &Arc<Self>, n: usize) {
-        let mut set = tokio::task::JoinSet::new();
-        for _ in 0..n {
-            let me = self.clone();
-            set.spawn(async move {
-                match me.open().await {
-                    Ok(s) => Some(PoolEntry {
+        let mut warmed = 0usize;
+        for i in 0..n {
+            if i > 0 {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            match self.open().await {
+                Ok(s) => {
+                    let entry = PoolEntry {
                         stream: s,
-                        created: Instant::now(),
-                    }),
-                    Err(e) => {
-                        tracing::debug!("pool warm: open failed: {}", e);
-                        None
+                        created: Instant::now() - Duration::from_secs(8 * i as u64),
+                    };
+                    let mut pool = self.pool.lock().await;
+                    if pool.len() < POOL_MAX {
+                        pool.push(entry);
+                        warmed += 1;
                     }
                 }
-            });
-        }
-        let mut warmed = 0;
-        while let Some(res) = set.join_next().await {
-            if let Ok(Some(entry)) = res {
-                let mut pool = self.pool.lock().await;
-                if pool.len() < POOL_MAX {
-                    pool.push(entry);
-                    warmed += 1;
+                Err(e) => {
+                    tracing::debug!("pool warm: open failed: {}", e);
                 }
             }
         }
         if warmed > 0 {
             tracing::info!("pool pre-warmed with {} connection(s)", warmed);
+        }
+    }
+
+    /// Background loop that keeps at least `POOL_MIN` valid connections
+    /// ready. A connection only counts toward the minimum if it has at
+    /// least 20 s of TTL remaining — nearly-expired entries don't help.
+    /// Checks every `POOL_REFILL_INTERVAL_SECS`, evicts expired entries,
+    /// and opens replacements one at a time so there's no burst.
+    pub async fn run_pool_refill(self: Arc<Self>) {
+        const MIN_REMAINING_SECS: u64 = 20;
+        loop {
+            tokio::time::sleep(Duration::from_secs(POOL_REFILL_INTERVAL_SECS)).await;
+
+            // Evict expired entries first.
+            {
+                let mut pool = self.pool.lock().await;
+                pool.retain(|e| e.created.elapsed().as_secs() < POOL_TTL_SECS);
+            }
+
+            // Count only connections with enough life left.
+            // Refill one at a time to avoid bursting TLS handshakes.
+            loop {
+                let healthy = {
+                    let pool = self.pool.lock().await;
+                    pool.iter()
+                        .filter(|e| {
+                            let age = e.created.elapsed().as_secs();
+                            age + MIN_REMAINING_SECS < POOL_TTL_SECS
+                        })
+                        .count()
+                };
+                if healthy >= POOL_MIN {
+                    break;
+                }
+                match self.open().await {
+                    Ok(s) => {
+                        let mut pool = self.pool.lock().await;
+                        if pool.len() < POOL_MAX {
+                            pool.push(PoolEntry {
+                                stream: s,
+                                created: Instant::now(),
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("pool refill: open failed: {}", e);
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -721,12 +771,17 @@ impl DomainFronter {
     async fn acquire(&self) -> Result<PoolEntry, FronterError> {
         {
             let mut pool = self.pool.lock().await;
-            while let Some(entry) = pool.pop() {
-                if entry.created.elapsed().as_secs() < POOL_TTL_SECS {
-                    return Ok(entry);
-                }
-                // expired — drop it
-                drop(entry);
+            // Evict expired, then hand out the freshest (most remaining TTL).
+            pool.retain(|e| e.created.elapsed().as_secs() < POOL_TTL_SECS);
+            if !pool.is_empty() {
+                // Freshest = smallest elapsed time. swap_remove is O(1).
+                let freshest = pool
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, e)| e.created.elapsed())
+                    .map(|(i, _)| i)
+                    .unwrap();
+                return Ok(pool.swap_remove(freshest));
             }
         }
         let stream = self.open().await?;
@@ -1114,8 +1169,29 @@ impl DomainFronter {
         // Fan-out path: fire N instances in parallel, return first Ok, cancel
         // the rest. Clamps to number of available script IDs so the single-ID
         // case is a no-op even if parallel_relay>1 was configured.
+        //
+        // `select_ok` cancels the loser futures, but those futures only own
+        // the OUR-side I/O (TLS write, response read) — the Apps Script
+        // server has no idea the racing Rust task is gone, so every fan-out
+        // call still completes server-side and Apps Script's
+        // `UrlFetchApp.fetch()` to the destination still fires. For
+        // **non-idempotent** methods (POST / PUT / PATCH / DELETE) this
+        // surfaces as duplicate writes at the destination — a comment
+        // posted twice, a vote double-counted, a payment double-charged.
+        //
+        // Reported in #743: parallel_relay=2 + a POST to GitHub created
+        // two issue comments per submission. Same root cause as the
+        // SAFE_REPLAY_METHODS guard in Code.gs's `_doBatch` fallback —
+        // safe methods are idempotent, so re-firing is at worst wasteful;
+        // unsafe methods can have side effects, so re-firing is incorrect.
+        //
+        // Drop to sequential for non-idempotent methods regardless of
+        // `parallel_relay` setting. Users keep p95 wins on browsing /
+        // GET-heavy traffic (the common case) and don't lose correctness
+        // on form submits.
+        let method_safe_for_fanout = is_method_safe_for_fanout(method);
         let fan = self.parallel_relay.min(self.script_ids.len()).max(1);
-        if fan >= 2 {
+        if fan >= 2 && method_safe_for_fanout {
             return self.do_relay_parallel(method, url, headers, body, fan).await;
         }
 
@@ -2642,6 +2718,18 @@ fn parse_status_line(line: &str) -> Result<u16, FronterError> {
     code.parse::<u16>().map_err(|_| FronterError::BadResponse(format!("bad status code: {}", code)))
 }
 
+/// Returns `true` if the HTTP method is safe to fan-out across multiple
+/// Apps Script deployments (i.e. idempotent per RFC 9110 §9.2.2). Used
+/// by `do_relay_with_retry` to gate the `parallel_relay` fan-out so that
+/// non-idempotent operations (POST / PUT / PATCH / DELETE) don't double-
+/// fire at the destination — Apps Script `UrlFetchApp.fetch()` can't be
+/// cancelled mid-request from our side, so every parallel attempt
+/// completes server-side even when our `select_ok` already returned a
+/// winner. See #743 for the user-visible bug (duplicate POSTs).
+fn is_method_safe_for_fanout(method: &str) -> bool {
+    matches!(method.to_ascii_uppercase().as_str(), "GET" | "HEAD" | "OPTIONS")
+}
+
 /// Parse the JSON envelope from Apps Script and build a raw HTTP response.
 fn parse_relay_json(body: &[u8]) -> Result<Vec<u8>, FronterError> {
     let text = std::str::from_utf8(body)
@@ -3534,6 +3622,38 @@ hello";
     fn mask_script_id_hides_middle() {
         assert_eq!(mask_script_id("short"), "***");
         assert_eq!(mask_script_id("AKfycbx1234567890abcdef"), "AKfy...cdef");
+    }
+
+    #[test]
+    fn parallel_relay_only_safe_for_idempotent_methods() {
+        // Locks down #743: parallel_relay must never fan-out non-idempotent
+        // methods because Apps Script can't be cancelled mid-request, so
+        // every concurrent attempt completes server-side and side-effects
+        // duplicate at the destination (comment posted twice, etc.).
+        for safe in ["GET", "HEAD", "OPTIONS", "get", "head", "options"] {
+            assert!(
+                is_method_safe_for_fanout(safe),
+                "{} should be safe for fan-out (idempotent per RFC 9110)",
+                safe,
+            );
+        }
+        for unsafe_m in ["POST", "PUT", "PATCH", "DELETE", "post", "put", "patch", "delete"] {
+            assert!(
+                !is_method_safe_for_fanout(unsafe_m),
+                "{} must NOT be safe for fan-out (non-idempotent — duplicate side-effects)",
+                unsafe_m,
+            );
+        }
+        // Unknown methods (CONNECT, TRACE, custom verbs) default to NOT
+        // safe — conservative call, matches the upstream `UrlFetchApp`
+        // lookup behavior.
+        for unknown in ["CONNECT", "TRACE", "PROPFIND", ""] {
+            assert!(
+                !is_method_safe_for_fanout(unknown),
+                "{} must default to NOT safe for fan-out when unrecognised",
+                unknown,
+            );
+        }
     }
 
     #[test]
