@@ -11,13 +11,16 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.therealaleph.mhrv.R
 import com.therealaleph.mhrv.CaInstall
 import com.therealaleph.mhrv.ui.theme.OkGreen
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
@@ -25,22 +28,32 @@ fun CertActionCard(
     onInstallClick: () -> Unit
 ) {
     val ctx = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val scope = rememberCoroutineScope()
     var isInstalled by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(true) }
-    
-    // Periodically re-check if the cert is in the AndroidCAStore.
-    LaunchedEffect(Unit) {
-        val fp = withContext(Dispatchers.IO) { CaInstall.fingerprint(ctx) }
-        if (fp == null) {
-            isLoading = false
-            return@LaunchedEffect
+
+    // Re-check on every ON_RESUME so the card flips to "installed" the moment
+    // the user returns from the system Settings cert-install flow. A timed
+    // poll loop here would leave a stale "Install" button on screen for up to
+    // its interval and would miss the case where the activity is recreated
+    // while backgrounded. Lifecycle events fire forward only, so we also do
+    // an initial check on first composition.
+    DisposableEffect(lifecycleOwner) {
+        val recheck: () -> Unit = {
+            scope.launch {
+                val fp = withContext(Dispatchers.IO) { CaInstall.fingerprint(ctx) }
+                isInstalled = fp != null &&
+                    withContext(Dispatchers.IO) { CaInstall.isInstalled(fp) }
+                isLoading = false
+            }
         }
-        
-        while (true) {
-            isInstalled = withContext(Dispatchers.IO) { CaInstall.isInstalled(fp) }
-            isLoading = false
-            delay(5000)
+        recheck()
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) recheck()
         }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     AnimatedContent(
