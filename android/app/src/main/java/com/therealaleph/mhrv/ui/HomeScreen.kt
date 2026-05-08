@@ -1273,6 +1273,28 @@ private fun AdvancedSettings(
             )
         }
 
+        // Block QUIC toggle
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    "Block QUIC",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Text(
+                    "Drop UDP/443 so browsers use TCP/HTTPS. QUIC over TCP tunnel causes meltdown.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(
+                checked = cfg.blockQuic,
+                onCheckedChange = { onChange(cfg.copy(blockQuic = it)) },
+            )
+        }
+
         // Block DoH toggle
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -1495,11 +1517,14 @@ private fun CollapsibleSection(
 /**
  * "Usage today (estimated)" card. Polls `Native.statsJson(handle)` every
  * second while the proxy is up and renders today's relay calls vs. the
- * Apps Script free-tier quota (20,000/day), today's bytes, UTC day key,
- * and a countdown to the 00:00 UTC reset. Also shows a "View quota on
- * Google" button that opens Google's Apps Script dashboard — the
- * authoritative number, since the client-side estimate only sees what
- * this device relayed.
+ * Apps Script free-tier quota (20,000/day), today's bytes, the Pacific
+ * Time day key, and a countdown to the 00:00 PT reset. Pacific Time
+ * matches Apps Script's actual quota reset cadence — UTC would have
+ * the counter resetting ~7-8 h before the user actually got a fresh
+ * quota allotment from Google. Also shows a "View quota on Google"
+ * button that opens Google's Apps Script dashboard — the authoritative
+ * number, since the client-side estimate only sees what this device
+ * relayed.
  *
  * Hidden when the handle is 0 (proxy not running) or the JSON comes back
  * empty (direct / full-only configs don't run a DomainFronter and so
@@ -1571,7 +1596,7 @@ private fun UsageTodayCard() {
                 value = fmtBytes(todayBytes),
             )
             UsageRow(
-                label = stringResource(R.string.label_utc_day),
+                label = stringResource(R.string.label_pt_day),
                 value = todayKey,
             )
             UsageRow(
