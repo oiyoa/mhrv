@@ -147,7 +147,7 @@ fun LiveStatsCard(statsJson: String) {
 
                     if (todayKey.isNotEmpty()) {
                         Text(
-                            text = "${stringResource(R.string.label_utc_day)}: $todayKey",
+                            text = "${stringResource(R.string.label_pt_day)}: $todayKey",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                         )
